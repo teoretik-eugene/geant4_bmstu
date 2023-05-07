@@ -149,4 +149,12 @@ runManager.SetUserInitialization(MyActionInitializer())
 
 runManager.Initialize()
 
-runManager.BeamOn(100)
+ui = G4UIExecutive(len(sys.argv), sys.argv)
+visManager = G4VisExecutive()
+visManager.Initialize()
+
+# Get the User Interface manager
+UImanager = G4UImanager.GetUIpointer()
+UImanager.ApplyCommand("/control/execute init_vis.mac")
+ui.SessionStart()
+#runManager.BeamOn(100)
