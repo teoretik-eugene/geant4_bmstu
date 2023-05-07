@@ -1,5 +1,5 @@
 from geant4_pybind import *
-from geant4_pybind import G4Event, G4VPhysicalVolume
+from geant4_pybind import G4Event, G4Step, G4TouchableHistory, G4VPhysicalVolume
 import sys
 
 
@@ -49,15 +49,44 @@ class MyDetectorConstructor(G4VUserDetectorConstruction):
                                  checkOverlaps
                                  )
         
-        logic_tar = G4LogicalVolume(solid_det, det_mat, "Target")
+        self.logic_tar = G4LogicalVolume(solid_det, det_mat, "Target")
         phys_tar = G4PVPlacement(None,
                                  G4ThreeVector(0, 0, -5*cm),
-                                 logic_tar,
+                                 self.logic_tar,
                                  "Target",
                                  logic_world,
                                  0,
                                  checkOverlaps)
         return phys_world
+    
+    def ConstructSDandField(self) -> None:
+        detector_name = "DetectorSD"
+        detector = MyDetector(detector_name)
+
+        fSDM = G4SDManager.GetSDMpointer()
+        fSDM.AddNewDetector(detector)
+        self.logic_tar.SetSensitiveDetector(detector)
+
+
+class MyDetector(G4VSensitiveDetector):
+
+    def __init__(self, arg0):
+        super().__init__(arg0)
+
+
+    def ProcessHits(self, aStep: G4Step, hist: G4TouchableHistory) -> bool:
+        track: G4Track = aStep.GetTrack()
+
+        preStepPoint: G4StepPoint = aStep.GetPreStepPoint()
+        postStepPoint: G4StepPoint = aStep.GetPostStepPoint()
+
+        posProton = preStepPoint.GetPosition()
+        energy = preStepPoint.GetKineticEnergy()
+
+        print(f'Proton pos: {posProton} --- Proton energy: {energy}')
+
+        return True
+
 
 class MyPrimaryGenerationAction(G4VUserPrimaryGeneratorAction):
     
@@ -117,7 +146,6 @@ physics.SetVerboseLevel(1)
 runManager.SetUserInitialization(physics)
 
 runManager.SetUserInitialization(MyActionInitializer())
-
 
 runManager.Initialize()
 
