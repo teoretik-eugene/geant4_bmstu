@@ -123,10 +123,17 @@ class ScreenDetector(G4VSensitiveDetector):
         super().__init__(name)
 
     def ProcessHits(self, aStep: G4Step, hist: G4TouchableHistory) -> bool:
-        edep = aStep.GetTotalEnergyDeposit()
+        edep = aStep.GetTotalEnergyDeposit()     # не понял че за энергия   
+
+        track = aStep.GetTrack()
+
+        kinetic = aStep.GetTrack().GetKineticEnergy()
+
+        if kinetic == 0 and track.GetDefinition().GetParticleName() == 'proton':
+            print(f'{track.GetDefinition().GetParticleName()}\'s kinetic 0 in \
+                  {track.GetVolume().GetName()} coord: {track.GetPosition().z/mm}')
 
         if edep == 0:
-            print('particle stopped')       # пока просто для себя
             return False
         
         newHit = TrackerHit(aStep.GetTrack().GetTrackID,
@@ -155,9 +162,10 @@ class TrackerHit(G4VHit):
             attribs.SetColor(colour)
             circle.SetVisAttributes(attribs)
             vVisManager.Draw(circle)
+            
     
     def Print(self) -> None:
-        print(f"TrackID: {self.fTrackID}  Edep: {self.fEdep}")
+        print(f"TrackID: {self.fTrackID}  =====  Edep: {self.fEdep}")
         #тут еще в примере что-то было
 
 
@@ -189,7 +197,7 @@ class PrimaryGeneration(G4VUserPrimaryGeneratorAction):
         if world_box != None:
             world_half_len = world_box.GetZHalfLength() # эту команду vs code не видит
         
-        self.fParticleGun.SetParticlePosition(G4ThreeVector(0, 0, -15*cm))
+        self.fParticleGun.SetParticlePosition(G4ThreeVector(0, 0, -5*cm))
         self.fParticleGun.GeneratePrimaryVertex(anEvent)
 
 
@@ -203,7 +211,7 @@ runManager: G4RunManager = G4RunManagerFactory.CreateRunManager(G4RunManagerType
 
 runManager.SetUserInitialization(ScreenGeometry())
 
-physics = QBBC()
+physics = FTFP_BERT()
 physics.SetVerboseLevel(1)
 
 runManager.SetUserInitialization(physics)
@@ -211,6 +219,7 @@ runManager.SetUserInitialization(physics)
 runManager.SetUserInitialization(ActionInitialization())
 
 runManager.Initialize()
+#runManager.BeamOn(100)
 
 ui = G4UIExecutive(len(sys.argv), sys.argv)
 visManager = G4VisExecutive()
@@ -218,8 +227,8 @@ visManager.Initialize()
 
 UImanager = G4UImanager.GetUIpointer()
 UImanager.ApplyCommand('/control/execute init_vis.mac')
-UImanager.ApplyCommand('/gun/particle e-')
-UImanager.ApplyCommand('/gun/energy 30 MeV')
-UImanager.ApplyCommand('/tracking/verbose 1')
-UImanager.ApplyCommand('/run/beamOn 20')
+UImanager.ApplyCommand('/gun/particle proton')
+UImanager.ApplyCommand('/gun/energy 50 MeV')
+UImanager.ApplyCommand('/tracking/verbose 0')
+UImanager.ApplyCommand('/run/beamOn 500')
 ui.SessionStart()
