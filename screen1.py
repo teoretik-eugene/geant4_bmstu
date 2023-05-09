@@ -69,7 +69,7 @@ class ScreenGeometry(G4VUserDetectorConstruction):
         self.logic_screen2 = G4LogicalVolume(self.solid_screen2, mat2, "Screen2")
         self.phys_screen2 = G4PVPlacement(
             None,
-            G4ThreeVector(0, 0, screen_coord + screen1_detZ*0.5+0.5*screen2_detZ),
+            G4ThreeVector(0, 0, screen_coord + screen1_detZ*0.5+ 0.5*screen2_detZ),
             self.logic_screen2,
             "Screen2",
             logic_world,
@@ -92,14 +92,74 @@ class ScreenGeometry(G4VUserDetectorConstruction):
 
         return phys_world
         
+    def ConstructSDandField(self) -> None:
+        
+        fSDM = G4SDManager.GetSDMpointer()
+
+        # Объявляем экраны чувствительными
+        screen1_detector_name = "Screen1_Detector"
+        screen1_detector = ScreenDetector(screen1_detector_name)
+
+        screen2_detector_name = "Screen2_Detector"
+        screen2_detector = ScreenDetector(screen2_detector_name)
+
+        screen3_detector_name = "Screen3_Detector"
+        screen3_detector = ScreenDetector(screen3_detector_name)
+
+        # Добавляем их в менеджер детекторов
+        fSDM.AddNewDetector(screen1_detector)
+        self.logic_screen1.SetSensitiveDetector(screen1_detector)
+
+        fSDM.AddNewDetector(screen2_detector)
+        self.logic_screen2.SetSensitiveDetector(screen2_detector)
+
+        fSDM.AddNewDetector(screen3_detector)
+        self.logic_screen3.SetSensitiveDetector(screen3_detector)
+
 
 class ScreenDetector(G4VSensitiveDetector):
 
-    def __init__(self, arg0):
-        super().__init__(arg0)
+    def __init__(self, name):
+        super().__init__(name)
 
-    def ProcessHits(self, arg0: G4Step, arg1: G4TouchableHistory) -> bool:
-        pass
+    def ProcessHits(self, aStep: G4Step, hist: G4TouchableHistory) -> bool:
+        edep = aStep.GetTotalEnergyDeposit()
+
+        if edep == 0:
+            print('particle stopped')       # пока просто для себя
+            return False
+        
+        newHit = TrackerHit(aStep.GetTrack().GetTrackID,
+                            edep,
+                            aStep.GetPostStepPoint().GetPosition(),
+                            aStep.GetPostStepPoint().GetKineticEnergy())
+        return True
+
+class TrackerHit(G4VHit):
+    
+    def __init__(self, trackID, edep, pos, kinetic) -> None:
+        super().__init__()
+        self.fTrackID = trackID
+        self.fEdep = edep
+        self.fPos = pos
+        self.fKinetic = kinetic
+    
+    def Draw(self) -> None:
+        vVisManager = G4VVisManager.GetConcreteInstance()
+        if vVisManager != None:
+            circle = G4Circle(self.fPos)
+            circle.SetScreenSize(4)
+            circle.SetFillStyle(G4Circle.filled)
+            colour = G4Colour(1, 0, 0)
+            attribs = G4VisAttributes()
+            attribs.SetColor(colour)
+            circle.SetVisAttributes(attribs)
+            vVisManager.Draw(circle)
+    
+    def Print(self) -> None:
+        print(f"TrackID: {self.fTrackID}  Edep: {self.fEdep}")
+        #тут еще в примере что-то было
+
 
 # Генерация частиц
 
@@ -158,4 +218,8 @@ visManager.Initialize()
 
 UImanager = G4UImanager.GetUIpointer()
 UImanager.ApplyCommand('/control/execute init_vis.mac')
+UImanager.ApplyCommand('/gun/particle e-')
+UImanager.ApplyCommand('/gun/energy 30 MeV')
+UImanager.ApplyCommand('/tracking/verbose 1')
+UImanager.ApplyCommand('/run/beamOn 20')
 ui.SessionStart()
