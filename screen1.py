@@ -1,6 +1,8 @@
 from geant4_pybind import *
 from geant4_pybind import G4Event, G4Step, G4TouchableHistory, G4VPhysicalVolume
 import sys
+import pandas as pd
+
 
 # Создание геометрии
 
@@ -9,17 +11,16 @@ class ScreenGeometry(G4VUserDetectorConstruction):
         super().__init__()
 
     def Construct(self) -> G4VPhysicalVolume:
-        
         nist = G4NistManager.Instance()
         checkOverlaps = True
 
         # World
 
-        world_sizeXY = 30*cm
-        world_sizeZ = 30*cm
+        world_sizeXY = 30 * cm
+        world_sizeZ = 30 * cm
         world_mat = nist.FindOrBuildMaterial('G4_AIR')
         # TODO: создать сплав из нескольких материалов
-        solid_world = G4Box("World", 0.5*world_sizeXY, 0.5*world_sizeXY, 0.5*world_sizeZ)
+        solid_world = G4Box("World", 0.5 * world_sizeXY, 0.5 * world_sizeXY, 0.5 * world_sizeZ)
         logic_world = G4LogicalVolume(solid_world, world_mat, "World")
 
         phys_world = G4PVPlacement(
@@ -33,26 +34,24 @@ class ScreenGeometry(G4VUserDetectorConstruction):
             checkOverlaps
         )
 
-
         # Материалы экранов
-        screen_detXY = 250*mm
-        screen1_detZ = 1.5*mm
-        screen2_detZ = 0.5*mm
-        screen3_detZ = 1.5*mm
+        screen_detXY = 250 * mm
+        screen1_detZ = 1.5 * mm
+        screen2_detZ = 0.5 * mm
+        screen3_detZ = 1.5 * mm
 
         # Al
         mat1 = nist.FindOrBuildMaterial('G4_Al')
         # W
         mat2 = nist.FindOrBuildMaterial('G4_W')
-        #Ni
+        # Ni
         mat3 = nist.FindOrBuildMaterial('G4_Ni')
 
-
-        #Положение экранов
-        screen_coord = 5*mm
+        # Положение экранов
+        screen_coord = 5 * mm
 
         # Первый экран
-        self.solid_screen1 = G4Box('Screen1', 0.5*screen_detXY, 0.5*screen_detXY, 0.5*screen1_detZ)
+        self.solid_screen1 = G4Box('Screen1', 0.5 * screen_detXY, 0.5 * screen_detXY, 0.5 * screen1_detZ)
         self.logic_screen1 = G4LogicalVolume(self.solid_screen1, mat1, "Screen1")
         self.phys_screen1 = G4PVPlacement(
             None,
@@ -65,11 +64,11 @@ class ScreenGeometry(G4VUserDetectorConstruction):
         )
 
         # Второй экран
-        self.solid_screen2 = G4Box("Screen2", 0.5*screen_detXY, 0.5*screen_detXY, 0.5*screen2_detZ)
+        self.solid_screen2 = G4Box("Screen2", 0.5 * screen_detXY, 0.5 * screen_detXY, 0.5 * screen2_detZ)
         self.logic_screen2 = G4LogicalVolume(self.solid_screen2, mat2, "Screen2")
         self.phys_screen2 = G4PVPlacement(
             None,
-            G4ThreeVector(0, 0, screen_coord + screen1_detZ*0.5+ 0.5*screen2_detZ),
+            G4ThreeVector(0, 0, screen_coord + screen1_detZ * 0.5 + 0.5 * screen2_detZ),
             self.logic_screen2,
             "Screen2",
             logic_world,
@@ -78,11 +77,11 @@ class ScreenGeometry(G4VUserDetectorConstruction):
         )
 
         # Третий экран
-        self.solid_screen3 = G4Box("Screen3", 0.5*screen_detXY, 0.5*screen_detXY, 0.5*screen3_detZ)
+        self.solid_screen3 = G4Box("Screen3", 0.5 * screen_detXY, 0.5 * screen_detXY, 0.5 * screen3_detZ)
         self.logic_screen3 = G4LogicalVolume(self.solid_screen3, mat3, "Screen3")
         self.phys_screen3 = G4PVPlacement(
             None,
-            G4ThreeVector(0, 0, screen_coord + 0.5*screen1_detZ + screen2_detZ + 0.5*screen3_detZ),
+            G4ThreeVector(0, 0, screen_coord + 0.5 * screen1_detZ + screen2_detZ + 0.5 * screen3_detZ),
             self.logic_screen3,
             "Screen3",
             logic_world,
@@ -91,9 +90,8 @@ class ScreenGeometry(G4VUserDetectorConstruction):
         )
 
         return phys_world
-        
+
     def ConstructSDandField(self) -> None:
-        
         fSDM = G4SDManager.GetSDMpointer()
 
         # Объявляем экраны чувствительными
@@ -123,7 +121,7 @@ class ScreenDetector(G4VSensitiveDetector):
         super().__init__(name)
 
     def ProcessHits(self, aStep: G4Step, hist: G4TouchableHistory) -> bool:
-        edep = aStep.GetTotalEnergyDeposit()     # не понял че за энергия   
+        edep = aStep.GetTotalEnergyDeposit()  # не понял че за энергия
 
         track = aStep.GetTrack()
 
@@ -131,26 +129,27 @@ class ScreenDetector(G4VSensitiveDetector):
 
         if kinetic == 0 and track.GetDefinition().GetParticleName() == 'e-':
             print(f'{track.GetDefinition().GetParticleName()}\'s kinetic 0 in \
-                  {track.GetVolume().GetName()} coord: {track.GetPosition().z/mm}')
+                  {track.GetVolume().GetName()} coord: {track.GetPosition().z / mm}')
 
         if edep == 0:
             return False
-        
+
         newHit = TrackerHit(aStep.GetTrack().GetTrackID,
                             edep,
                             aStep.GetPostStepPoint().GetPosition(),
                             aStep.GetPostStepPoint().GetKineticEnergy())
         return True
 
+
 class TrackerHit(G4VHit):
-    
+
     def __init__(self, trackID, edep, pos, kinetic) -> None:
         super().__init__()
         self.fTrackID = trackID
         self.fEdep = edep
         self.fPos = pos
         self.fKinetic = kinetic
-    
+
     def Draw(self) -> None:
         vVisManager = G4VVisManager.GetConcreteInstance()
         if vVisManager != None:
@@ -162,11 +161,53 @@ class TrackerHit(G4VHit):
             attribs.SetColor(colour)
             circle.SetVisAttributes(attribs)
             vVisManager.Draw(circle)
-            
-    
+
     def Print(self) -> None:
         print(f"TrackID: {self.fTrackID}  =====  Edep: {self.fEdep}")
-        #тут еще в примере что-то было
+        # тут еще в примере что-то было
+
+
+# Получение треков
+
+
+class SteppingAction(G4UserSteppingAction):
+    def __init__(self):
+        super().__init__()
+    steps = []
+
+    def UserSteppingAction(self, step: G4Step, arr=steps) -> None:
+        track = step.GetTrack()
+        if track.GetCurrentStepNumber() == 1:
+            parent_id, track_id, particle = (track.GetParentID(), track.GetTrackID(), \
+                                             step.GetTrack().GetDefinition().GetParticleName())
+            pos_X = step.GetPreStepPoint().GetPosition().x
+            pos_Y = step.GetPreStepPoint().GetPosition().y
+            pos_Z = step.GetPreStepPoint().GetPosition().z
+            step_id = 0
+            step_info = {"parent_id": parent_id,
+                         "track_id": track_id,
+                         "particle": particle,
+                         "Step": step_id,
+                         "X": pos_X,
+                         "Y": pos_Y,
+                         "Z": pos_Z}
+            arr.append(step_info)
+        parent_id, track_id, particle = (track.GetParentID(), track.GetTrackID(), \
+                                         step.GetTrack().GetDefinition().GetParticleName())
+        pos_X = track.GetPosition().x
+        pos_Y = track.GetPosition().y
+        pos_Z = track.GetPosition().z
+        step_id = track.GetCurrentStepNumber()
+        step_info = {"parent_id": parent_id,
+                     "track_id": track_id,
+                     "particle": particle,
+                     "Step": step_id,
+                     "X": pos_X,
+                     "Y": pos_Y,
+                     "Z": pos_Z}
+        arr.append(step_info)
+
+
 
 
 # Генерация частиц
@@ -180,30 +221,31 @@ class PrimaryGeneration(G4VUserPrimaryGeneratorAction):
 
         particle_table = G4ParticleTable.GetParticleTable()
         particle = particle_table.FindAntiParticle("proton")
-        
+
         self.fParticleGun.SetParticleDefinition(particle)
         self.fParticleGun.SetParticleMomentumDirection(G4ThreeVector(0., 0., 1.0))
-        self.fParticleGun.SetParticleEnergy(50*MeV)
-    
+        self.fParticleGun.SetParticleEnergy(50 * MeV)
+
     def GeneratePrimaries(self, anEvent: G4Event) -> None:
-        
+
         worldLV = G4LogicalVolumeStore.GetInstance().GetVolume("World")
         world_box = None
         world_half_len = None
 
         if worldLV != None:
             world_box = worldLV.GetSolid()
-        
+
         if world_box != None:
-            world_half_len = world_box.GetZHalfLength() # эту команду vs code не видит
-        
-        self.fParticleGun.SetParticlePosition(G4ThreeVector(0, 0, -5*cm))
+            world_half_len = world_box.GetZHalfLength()  # эту команду vs code не видит
+
+        self.fParticleGun.SetParticlePosition(G4ThreeVector(0, 0, -5 * cm))
         self.fParticleGun.GeneratePrimaryVertex(anEvent)
 
 
 class ActionInitialization(G4VUserActionInitialization):
 
     def Build(self) -> None:
+        self.SetUserAction(SteppingAction())
         self.SetUserAction(PrimaryGeneration())
 
 
@@ -219,7 +261,7 @@ runManager.SetUserInitialization(physics)
 runManager.SetUserInitialization(ActionInitialization())
 
 runManager.Initialize()
-#runManager.BeamOn(100)
+# runManager.BeamOn(100)
 
 ui = G4UIExecutive(len(sys.argv), sys.argv)
 visManager = G4VisExecutive()
@@ -229,8 +271,9 @@ UImanager = G4UImanager.GetUIpointer()
 UImanager.ApplyCommand('/control/execute init_vis.mac')
 UImanager.ApplyCommand('/gun/particle proton')
 UImanager.ApplyCommand('/gun/energy 10 MeV')
-UImanager.ApplyCommand('/tracking/verbose 1')
-UImanager.ApplyCommand('/run/beamOn 10')
+UImanager.ApplyCommand('/tracking/verbose 0')
+UImanager.ApplyCommand('/run/beamOn 1')
+df = pd.DataFrame(SteppingAction.steps)
+print(df)
 ui.SessionStart()
-
 sys.exit()
