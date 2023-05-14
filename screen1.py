@@ -18,7 +18,7 @@ class ScreenGeometry(G4VUserDetectorConstruction):
         world_sizeXY = 30*cm
         world_sizeZ = 30*cm
         world_mat = nist.FindOrBuildMaterial('G4_AIR')
-
+        # TODO: создать сплав из нескольких материалов
         solid_world = G4Box("World", 0.5*world_sizeXY, 0.5*world_sizeXY, 0.5*world_sizeZ)
         logic_world = G4LogicalVolume(solid_world, world_mat, "World")
 
@@ -129,7 +129,7 @@ class ScreenDetector(G4VSensitiveDetector):
 
         kinetic = aStep.GetTrack().GetKineticEnergy()
 
-        if kinetic == 0 and track.GetDefinition().GetParticleName() == 'proton':
+        if kinetic == 0 and track.GetDefinition().GetParticleName() == 'e-':
             print(f'{track.GetDefinition().GetParticleName()}\'s kinetic 0 in \
                   {track.GetVolume().GetName()} coord: {track.GetPosition().z/mm}')
 
@@ -175,7 +175,7 @@ class PrimaryGeneration(G4VUserPrimaryGeneratorAction):
     def __init__(self) -> None:
         super().__init__()
 
-        n_particles = 20
+        n_particles = 1
         self.fParticleGun = G4ParticleGun(n_particles)
 
         particle_table = G4ParticleTable.GetParticleTable()
@@ -228,7 +228,9 @@ visManager.Initialize()
 UImanager = G4UImanager.GetUIpointer()
 UImanager.ApplyCommand('/control/execute init_vis.mac')
 UImanager.ApplyCommand('/gun/particle proton')
-UImanager.ApplyCommand('/gun/energy 50 MeV')
-UImanager.ApplyCommand('/tracking/verbose 0')
-UImanager.ApplyCommand('/run/beamOn 500')
+UImanager.ApplyCommand('/gun/energy 10 MeV')
+UImanager.ApplyCommand('/tracking/verbose 1')
+UImanager.ApplyCommand('/run/beamOn 10')
 ui.SessionStart()
+
+sys.exit()
