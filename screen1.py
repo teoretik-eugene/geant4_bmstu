@@ -184,27 +184,48 @@ class SteppingAction(G4UserSteppingAction):
             pos_Y = step.GetPreStepPoint().GetPosition().y
             pos_Z = step.GetPreStepPoint().GetPosition().z
             step_id = 0
+            volume = track.GetVolume().GetName()
+            material = track.GetMaterial().GetName()
+            kinE = track.GetKineticEnergy()
+            step_leng = track.GetStepLength()
+            track_leng = track.GetTrackLength()
             step_info = {"parent_id": parent_id,
                          "track_id": track_id,
                          "particle": particle,
                          "Step": step_id,
                          "X": pos_X,
                          "Y": pos_Y,
-                         "Z": pos_Z}
+                         "Z": pos_Z,
+                         "kinE": kinE,
+                         "volume": volume,
+                         "material": material,
+                         "step_len:": step_leng,
+                         "track_len": track_leng}
             arr.append(step_info)
         parent_id, track_id, particle = (track.GetParentID(), track.GetTrackID(), \
                                          step.GetTrack().GetDefinition().GetParticleName())
         pos_X = track.GetPosition().x
         pos_Y = track.GetPosition().y
         pos_Z = track.GetPosition().z
+        volume = track.GetVolume().GetName()
+        material = track.GetMaterial().GetName()
         step_id = track.GetCurrentStepNumber()
+        kinE = track.GetKineticEnergy()
+        print(kinE)
+        step_leng = track.GetStepLength()
+        track_leng = track.GetTrackLength()
         step_info = {"parent_id": parent_id,
                      "track_id": track_id,
                      "particle": particle,
                      "Step": step_id,
                      "X": pos_X,
                      "Y": pos_Y,
-                     "Z": pos_Z}
+                     "Z": pos_Z,
+                     "kinE": kinE,
+                     "volume": volume,
+                     "material": material,
+                     "step_len:": step_leng,
+                     "track_len": track_leng}
         arr.append(step_info)
 
 
@@ -270,10 +291,11 @@ visManager.Initialize()
 UImanager = G4UImanager.GetUIpointer()
 UImanager.ApplyCommand('/control/execute init_vis.mac')
 UImanager.ApplyCommand('/gun/particle proton')
-UImanager.ApplyCommand('/gun/energy 10 MeV')
+UImanager.ApplyCommand('/gun/energy 40 MeV')
 UImanager.ApplyCommand('/tracking/verbose 0')
 UImanager.ApplyCommand('/run/beamOn 1')
 df = pd.DataFrame(SteppingAction.steps)
+# df.to_pickle("./screen.pkl")
 print(df)
 ui.SessionStart()
 sys.exit()
