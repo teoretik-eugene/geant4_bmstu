@@ -1,0 +1,7 @@
+1. есть такая штука, как  annihilation, по идее частицы уничтожаются, но я видел это только у е+. 
+У остальных просто может к. энергия в 0 уйти, но там другой какой-то процесс, который нельзя нагуглить
+2. проблема с этой строчкой кода в классе  ScreenDetector:
+if edep == 0:
+            if track.GetDefinition().GetParticleName() == 'e-':
+                print(f'{track.GetDefinition().GetParticleName()} stopped in {track.GetVolume().GetName()}')       # пока просто для себя
+            return False
