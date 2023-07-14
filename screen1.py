@@ -7,8 +7,9 @@ import pandas as pd
 # Создание геометрии
 
 class ScreenGeometry(G4VUserDetectorConstruction):
-    def __init__(self) -> None:
+    def __init__(self, a) -> None:
         super().__init__()
+        self.a = a
 
     def Construct(self) -> G4VPhysicalVolume:
         nist = G4NistManager.Instance()
@@ -272,7 +273,7 @@ class ActionInitialization(G4VUserActionInitialization):
 
 runManager: G4RunManager = G4RunManagerFactory.CreateRunManager(G4RunManagerType.Serial)
 
-runManager.SetUserInitialization(ScreenGeometry())
+runManager.SetUserInitialization(ScreenGeometry(1))
 
 physics = FTFP_BERT()
 physics.SetVerboseLevel(1)
