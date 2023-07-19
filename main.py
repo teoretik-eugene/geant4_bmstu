@@ -157,16 +157,16 @@ if __name__ == '__main__':
     
     runManager: G4RunManager = G4RunManagerFactory.CreateRunManager(G4RunManagerType.Serial)
     
-    runManager.SetUserInitialization(ScreenGeometry(ds=ds, tp=tp))
-
+    runManager.SetUserInitialization(ScreenGeometry(ds, tp))
+    
     physics = FTFP_BERT()
     physics.SetVerboseLevel(1)
-
     runManager.SetUserInitialization(physics)
 
     runManager.SetUserInitialization(ActionInitialization())
 
     runManager.Initialize()
     runManager.BeamOn(10)
+
 
 
