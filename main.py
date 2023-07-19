@@ -2,6 +2,7 @@ from geant4_pybind import *
 from geant4_pybind import G4VPhysicalVolume
 from DataServer import DataServer
 from TrimParser import TrimParser
+import sys
 
 class ScreenGeometry(G4VUserDetectorConstruction):
     def __init__(self, ds: DataServer, tp: TrimParser) -> None:
@@ -35,6 +36,9 @@ class ScreenGeometry(G4VUserDetectorConstruction):
             checkOverlaps
         )
 
+        '''
+            Возникает ошибка: Segmentation fault (core dumped)
+        '''
         # Логика формирования экранов, по хорошему, конечно, стоит вынести это в отдельный метод
         materials = self.tp.readMaterials()
         # 9 task as an example !
@@ -60,7 +64,7 @@ class ScreenGeometry(G4VUserDetectorConstruction):
                 element_list.append([element, elem_percentage, elem_density])    # вот тут нужно процент высчитать
             
             # Высчитывание процента
-            # Ром, тут ты делай красиво, я в вашем питоне не шарю
+            # @Ром, тут ты делай красиво, я в вашем питоне не шарю
             total = 0
             for _ in element_list:
                 total += _[1]
@@ -84,21 +88,85 @@ class ScreenGeometry(G4VUserDetectorConstruction):
         screen_coord = 15 * mm
 
         # Создание непосредственно экранов:
+        # Перебираем все материалы и для каждого материала создаем экран
+        screen_list = []    # лист экранов, будем потом передавать этот лист
         num = 0
+        print(f'mat len: {len(material_list)}')
         for mat in material_list:
-            screen_name = f'Screen - {num} -- {mat[2]}'
+            screen_name = f'Screen-{num} -- {mat[2]}'
             screen_width = mat[1] / 1000 * mm
+            screen_mat = mat[0]
             num += 1
             solid_screen = G4Box(screen_name, 0.5 * screen_detXY, 0.5 * screen_detXY, 0.5 * screen_width)
+            logic_screen = G4LogicalVolume(solid_screen, screen_mat, screen_name)
+            phys_screen = G4PVPlacement(
+                None, 
+                G4ThreeVector(0, 0, screen_coord + 0.5*screen_width),   # раставляем вдоль оси z
+                logic_screen,
+                screen_name,
+                logic_world,
+                0,
+                checkOverlaps
+            )
+            # Перемещаем координату экрана на величину толщины экрана
+            screen_coord += screen_width
+            screen_list.append(phys_screen)
 
+        return phys_world
+    
 
+class PrimaryGeneration(G4VUserPrimaryGeneratorAction):
+    def __init__(self) -> None:
+        super().__init__()
 
+        n_particles = 1
+        self.fParticleGun = G4ParticleGun(n_particles)
 
+        particle_table = G4ParticleTable.GetParticleTable()
+        particle = particle_table.FindAntiParticle("proton")
+
+        self.fParticleGun.SetParticleDefinition(particle)
+        self.fParticleGun.SetParticleMomentumDirection(G4ThreeVector(0., 0., 1.0))
+        self.fParticleGun.SetParticleEnergy(50 * MeV)
+
+    def GeneratePrimaries(self, anEvent: G4Event) -> None:
+
+        worldLV = G4LogicalVolumeStore.GetInstance().GetVolume("World")
+        world_box = None
+        world_half_len = None
+
+        if worldLV != None:
+            world_box = worldLV.GetSolid()
+
+        if world_box != None:
+            world_half_len = world_box.GetZHalfLength()  # эту команду vs code не видит
+
+        self.fParticleGun.SetParticlePosition(G4ThreeVector(0, 0, -5 * cm))
+        self.fParticleGun.GeneratePrimaryVertex(anEvent)
+
+class ActionInitialization(G4VUserActionInitialization):
+
+    def Build(self) -> None:
+        #self.SetUserAction(SteppingAction())
+        self.SetUserAction(PrimaryGeneration())
 
 if __name__ == '__main__':
     # Создаем объект класса, который будет общаться с серваком
     ds = DataServer()
     tp = TrimParser(data=ds.get_current_task_to_json(9))
-    sc = ScreenGeometry(ds, tp)
-    sc.Construct()
+    
+    runManager: G4RunManager = G4RunManagerFactory.CreateRunManager(G4RunManagerType.Serial)
+    
+    runManager.SetUserInitialization(ScreenGeometry(ds=ds, tp=tp))
+
+    physics = FTFP_BERT()
+    physics.SetVerboseLevel(1)
+
+    runManager.SetUserInitialization(physics)
+
+    runManager.SetUserInitialization(ActionInitialization())
+
+    runManager.Initialize()
+    runManager.BeamOn(10)
+
 
