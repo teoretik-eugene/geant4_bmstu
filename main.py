@@ -1,14 +1,14 @@
 from geant4_pybind import *
-from geant4_pybind import G4VPhysicalVolume
+from geant4_pybind import G4Step, G4TouchableHistory, G4VPhysicalVolume
 from DataServer import DataServer
 from TrimParser import TrimParser
 import sys
 
 class ScreenGeometry(G4VUserDetectorConstruction):
-    def __init__(self) -> None:
+    def __init__(self, task_id: int) -> None:
         super().__init__()
         self.ds = ds = DataServer()
-        self.tp = TrimParser(data=ds.get_current_task_to_json(9))
+        self.tp = TrimParser(data=ds.get_current_task_to_json(task_id))
 
     # TODO реализовать логику создания экранов/слоев из запроса
     def Construct(self) -> G4VPhysicalVolume:
@@ -81,17 +81,46 @@ class ScreenGeometry(G4VUserDetectorConstruction):
             for _ in element_list:
                 material.AddElement(_[0], frac=_[1])
             print(material.GetName())
-            material_list.append(material)
+            material_list.append([material, mat_width, mat_name])
 
-        with open('log.txt', 'w+') as f:
-            for m in material_list:
-                f.write(str(m))
-                f.write('\n')
+        
+        screen_detXY = 250 * mm
+        screen_coord = 15 * mm
 
+        self.screen_list = []
+        num = 0
+        for mat in material_list:
+            screen_name = f'Screen-{num}--{mat[2]}'
+            screen_width = mat[1]
+            screen_material = mat[0]
+            num += 1
+            solid_screen = G4Box(screen_name, 0.5*screen_detXY, 0.5*screen_detXY, 0.5*screen_width)
+            logic_screen = G4LogicalVolume(solid_screen, screen_material, screen_name)
+            phys_screen = G4PVPlacement(
+                None,
+                G4ThreeVector(0, 0, screen_coord + 0.5 * screen_width),
+                logic_screen,
+                screen_name,
+                logic_world,
+                0,
+                checkOverlaps
+            )
+            screen_coord += screen_width
+            self.screen_list.append(phys_screen)
 
 
         return phys_world
     
+class ScreenSensitiveDetector(G4VSensitiveDetector):
+
+    def __init__(self, name: str):
+        super().__init__(name)
+
+    def ProcessHits(self, arg0: G4Step, arg1: G4TouchableHistory) -> bool:
+        
+        
+        return True
+
 
 class PrimaryGeneration(G4VUserPrimaryGeneratorAction):
     def __init__(self) -> None:
@@ -119,7 +148,7 @@ class PrimaryGeneration(G4VUserPrimaryGeneratorAction):
         if world_box != None:
             world_half_len = world_box.GetZHalfLength()  # эту команду vs code не видит
 
-        self.fParticleGun.SetParticlePosition(G4ThreeVector(0, 0, 5*mm ))
+        self.fParticleGun.SetParticlePosition(G4ThreeVector(0, 0, -5*mm ))
         self.fParticleGun.GeneratePrimaryVertex(anEvent)
 
 class ActionInitialization(G4VUserActionInitialization):
@@ -132,10 +161,11 @@ if __name__ == '__main__':
     # Создаем объект класса, который будет общаться с серваком
     #ds = DataServer()
     #tp = TrimParser(data=ds.get_current_task_to_json(9))
+    task_id = 170
     
     runManager: G4RunManager = G4RunManagerFactory.CreateRunManager(G4RunManagerType.Serial)
     
-    runManager.SetUserInitialization(ScreenGeometry())
+    runManager.SetUserInitialization(ScreenGeometry(task_id=task_id))
     
     physics = FTFP_BERT()
     physics.SetVerboseLevel(1)
@@ -144,9 +174,19 @@ if __name__ == '__main__':
     runManager.SetUserInitialization(ActionInitialization())
 
     runManager.Initialize()
-    #print(G4LogicalVolumeStore.GetInstance().GetVolume('Screen-0--ВТ5Л'))
-    runManager.BeamOn(1)
+    #runManager.BeamOn(10)
 
-    #print(G4LogicalVolumeStore.GetInstance().GetVolume('Screen-'))
+    ui = G4UIExecutive(len(sys.argv), sys.argv)
+    visManager = G4VisExecutive()
+    visManager.Initialize()
+
+    UImanager = G4UImanager.GetUIpointer()
+    UImanager.ApplyCommand('/control/execute init_vis.mac')
+    UImanager.ApplyCommand('/gun/particle proton')
+    UImanager.ApplyCommand('/gun/energy 40 MeV')
+    UImanager.ApplyCommand('/tracking/verbose 0')
+    UImanager.ApplyCommand('/run/beamOn 50')
+    ui.SessionStart()
+    sys.exit()
 
 
