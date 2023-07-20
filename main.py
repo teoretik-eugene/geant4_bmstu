@@ -5,10 +5,10 @@ from TrimParser import TrimParser
 import sys
 
 class ScreenGeometry(G4VUserDetectorConstruction):
-    def __init__(self, ds: DataServer, tp: TrimParser) -> None:
+    def __init__(self) -> None:
         super().__init__()
-        self.ds = ds
-        self.tp = tp
+        self.ds = ds = DataServer()
+        self.tp = TrimParser(data=ds.get_current_task_to_json(9))
 
     # TODO реализовать логику создания экранов/слоев из запроса
     def Construct(self) -> G4VPhysicalVolume:
@@ -41,77 +41,60 @@ class ScreenGeometry(G4VUserDetectorConstruction):
         '''
         # Логика формирования экранов, по хорошему, конечно, стоит вынести это в отдельный метод
         materials = self.tp.readMaterials()
-        # 9 task as an example !
-        material_list = []
+        self.test_material
+        '''
+        self.material_list = []
         for mat in materials:
-            material_name = mat.get('Name')
-            material_width = float(mat.get('Width'))
-
+            mat_name = mat.get('Name')
+            mat_width = (float(mat.get('Width')) / 1000) * mm
+            
             elements = mat.get('Elements')
             element_list = []
+            
             for elem in elements:
                 elem_name = elem.get('Name')
                 elem_symbol = elem.get('Symbol')
                 elem_atomic_number = float(elem.get('Atomic_number'))
                 elem_density = float(elem.get('Density'))
                 elem_aem = float(elem.get('Standard_atomic_weight'))
-                elem_percentage = float(elem.get('Percentage'))
-                
-                # Но тут можно попробовать и создавать стандартные элементы типа G4_ название
-                # с большой буквы
-                element = G4Element(name=elem_name, symbol=elem_symbol, 
-                                    Zeff=elem_atomic_number, Aeff=elem_aem*g/mole)
-                element_list.append([element, elem_percentage, elem_density])    # вот тут нужно процент высчитать
+                elem_perc = float(elem.get('Percentage'))
+                #мб попробовать другое название вбивать?
+                #element = nist.FindOrBuildElement(elem_atomic_number, False)
+                element = G4Element(elem_name, elem_symbol, elem_atomic_number, elem_aem*g/mole)
+                #print(f'elem: {element}')
+                element_list.append([element, elem_perc, elem_density])
             
             # Высчитывание процента
-            # @Ром, тут ты делай красиво, я в вашем питоне не шарю
-            total = 0
+            total_perc = 0
+            # Общий относительный процент
             for _ in element_list:
-                total += _[1]
+                total_perc += _[1]
             
-            avg_density = 0     # плотность материала вычисляется как сумма плотностей с множителями
+            avg_density = 0
             for _ in element_list:
-                _[1] = _[1] / total
+                # elem_perc = elem_perc / total
+                _[1] = _[1] / total_perc
+                # avg_density = elem_perc1 * elem_density1 + elem_perc2 * elem_density2
                 avg_density += _[1] * _[2]
-
-            material = G4Material(name=material_name, density=avg_density*g/cm3, 
-                                  nComponents=len(element_list))
             
+            components = len(element_list)
+            print(components)
+            print('creating material')
+            material = G4Material(mat_name, avg_density*g/cm3, components)
             for _ in element_list:
+                print(_[1])
+                print(_[0].GetName())
                 material.AddElement(_[0], frac=_[1])
+            print('finished')
+            print(material.GetName())
+            self.material_list.append(material)
 
-            material_list.append(tuple([material, material_width, material_name]))
-            print(material)
-
-        # Размеры экранов
-        screen_detXY = 250 * mm
-        screen_coord = 15 * mm
-
-        # Создание непосредственно экранов:
-        # Перебираем все материалы и для каждого материала создаем экран
-        screen_list = []    # лист экранов, будем потом передавать этот лист
-        num = 0
-        print(f'mat len: {len(material_list)}')
-        for mat in material_list:
-            screen_name = f'Screen-{num} -- {mat[2]}'
-            screen_width = mat[1] / 1000 * mm
-            screen_mat = mat[0]
-            num += 1
-            solid_screen = G4Box(screen_name, 0.5 * screen_detXY, 0.5 * screen_detXY, 0.5 * screen_width)
-            logic_screen = G4LogicalVolume(solid_screen, screen_mat, screen_name)
-            phys_screen = G4PVPlacement(
-                None, 
-                G4ThreeVector(0, 0, screen_coord + 0.5*screen_width),   # раставляем вдоль оси z
-                logic_screen,
-                screen_name,
-                logic_world,
-                0,
-                checkOverlaps
-            )
-            # Перемещаем координату экрана на величину толщины экрана
-            screen_coord += screen_width
-            screen_list.append(phys_screen)
-
+        print('mat finished')
+        
+        print('MATERIAL TABLE:')
+        print(G4Material.GetMaterialTable())
+        print('MATERIALS')
+        '''
         return phys_world
     
 
@@ -127,11 +110,12 @@ class PrimaryGeneration(G4VUserPrimaryGeneratorAction):
 
         self.fParticleGun.SetParticleDefinition(particle)
         self.fParticleGun.SetParticleMomentumDirection(G4ThreeVector(0., 0., 1.0))
-        self.fParticleGun.SetParticleEnergy(50 * MeV)
+        self.fParticleGun.SetParticleEnergy(4 * MeV)
 
     def GeneratePrimaries(self, anEvent: G4Event) -> None:
 
         worldLV = G4LogicalVolumeStore.GetInstance().GetVolume("World")
+        print('world')
         world_box = None
         world_half_len = None
 
@@ -141,7 +125,7 @@ class PrimaryGeneration(G4VUserPrimaryGeneratorAction):
         if world_box != None:
             world_half_len = world_box.GetZHalfLength()  # эту команду vs code не видит
 
-        self.fParticleGun.SetParticlePosition(G4ThreeVector(0, 0, -5 * cm))
+        self.fParticleGun.SetParticlePosition(G4ThreeVector(0, 0, 5*mm ))
         self.fParticleGun.GeneratePrimaryVertex(anEvent)
 
 class ActionInitialization(G4VUserActionInitialization):
@@ -152,12 +136,12 @@ class ActionInitialization(G4VUserActionInitialization):
 
 if __name__ == '__main__':
     # Создаем объект класса, который будет общаться с серваком
-    ds = DataServer()
-    tp = TrimParser(data=ds.get_current_task_to_json(9))
+    #ds = DataServer()
+    #tp = TrimParser(data=ds.get_current_task_to_json(9))
     
     runManager: G4RunManager = G4RunManagerFactory.CreateRunManager(G4RunManagerType.Serial)
     
-    runManager.SetUserInitialization(ScreenGeometry(ds, tp))
+    runManager.SetUserInitialization(ScreenGeometry())
     
     physics = FTFP_BERT()
     physics.SetVerboseLevel(1)
@@ -166,7 +150,9 @@ if __name__ == '__main__':
     runManager.SetUserInitialization(ActionInitialization())
 
     runManager.Initialize()
-    runManager.BeamOn(10)
+    #print(G4LogicalVolumeStore.GetInstance().GetVolume('Screen-0--ВТ5Л'))
+    runManager.BeamOn(1)
 
+    #print(G4LogicalVolumeStore.GetInstance().GetVolume('Screen-'))
 
 
