@@ -41,11 +41,8 @@ class ScreenGeometry(G4VUserDetectorConstruction):
         '''
         # Логика формирования экранов, по хорошему, конечно, стоит вынести это в отдельный метод
         materials = self.tp.readMaterials()
-        element = nist.FindOrBuildElement(symb='Al', isotopes=False)
-        print('=========================ELEMENT:===================')
-        print(element)
-        '''
-        self.material_list = []
+        
+        material_list = []
         for mat in materials:
             mat_name = mat.get('Name')
             mat_width = (float(mat.get('Width')) / 1000) * mm
@@ -62,7 +59,7 @@ class ScreenGeometry(G4VUserDetectorConstruction):
                 elem_perc = float(elem.get('Percentage'))
                 #мб попробовать другое название вбивать?
                 #element = nist.FindOrBuildElement(elem_atomic_number, False)
-                element = G4Element(elem_name, elem_symbol, elem_atomic_number, elem_aem*g/mole)
+                element = nist.FindOrBuildElement(elem_symbol)
                 #print(f'elem: {element}')
                 element_list.append([element, elem_perc, elem_density])
             
@@ -80,23 +77,19 @@ class ScreenGeometry(G4VUserDetectorConstruction):
                 avg_density += _[1] * _[2]
             
             components = len(element_list)
-            print(components)
-            print('creating material')
             material = G4Material(mat_name, avg_density*g/cm3, components)
             for _ in element_list:
-                print(_[1])
-                print(_[0].GetName())
                 material.AddElement(_[0], frac=_[1])
-            print('finished')
             print(material.GetName())
-            self.material_list.append(material)
+            material_list.append(material)
 
-        print('mat finished')
-        
-        print('MATERIAL TABLE:')
-        print(G4Material.GetMaterialTable())
-        print('MATERIALS')
-        '''
+        with open('log.txt', 'w+') as f:
+            for m in material_list:
+                f.write(str(m))
+                f.write('\n')
+
+
+
         return phys_world
     
 
@@ -117,7 +110,6 @@ class PrimaryGeneration(G4VUserPrimaryGeneratorAction):
     def GeneratePrimaries(self, anEvent: G4Event) -> None:
 
         worldLV = G4LogicalVolumeStore.GetInstance().GetVolume("World")
-        print('world')
         world_box = None
         world_half_len = None
 

@@ -81,6 +81,11 @@ class ScreenGeometry(G4VUserDetectorConstruction):
         elem_perc2 = 94
 
         element2 = nist.FindOrBuildElement(elem_symbol2)
+        
+        avg_density = 4.43
+        material = G4Material('ВТ5Л', avg_density * g/cm3, 2)
+        material.AddElement(element1, 6*perCent)
+        material.AddElement(element2, 94*perCent)
 
         with open('log.txt', 'w+') as f:
             f.write(element1.GetName() + '\n')
@@ -90,11 +95,22 @@ class ScreenGeometry(G4VUserDetectorConstruction):
             f.write(element2.GetName() + '\n')
             f.write(str(element2.GetIndex()) + '\n')
             f.write(str(element2.GetAtomicMassAmu())+'\n')
-        
-        avg_density = 4.43
-        material = G4Material('ВТ5Л', avg_density * g/cm3, 2)
-        material.AddElement(element1, 6*perCent)
-        material.AddElement(element2, 94*perCent)
+
+            f.write(material.GetName() + '\n')
+            f.write(str(material.GetDensity()) + '\n')
+            f.write(str(material))
+
+        self.solid_screen2 = G4Box('Screen2', 0.5 * screen_detXY, 0.5 * screen_detXY, 0.5 * screen2_detZ)
+        self.logic_screen2 = G4LogicalVolume(self.solid_screen2, material, "Screen2")
+        self.phys_screen2 = G4PVPlacement(
+            None,
+            G4ThreeVector(0, 0, screen_coord + 0.5 * screen1_detZ + 0.5*screen2_detZ),
+            self.logic_screen2,
+            "Screen2",
+            logic_world,
+            0,
+            checkOverlaps
+        )
 
         
 
@@ -110,10 +126,15 @@ class ScreenGeometry(G4VUserDetectorConstruction):
         screen1_detector_name = "Screen1_Detector"
         screen1_detector = ScreenDetector(screen1_detector_name)
 
+        screen2_detector_name = "Screen2_Detector"
+        screen2_detector = ScreenDetector(screen2_detector_name)
 
         # Добавляем их в менеджер детекторов
         fSDM.AddNewDetector(screen1_detector)
         self.logic_screen1.SetSensitiveDetector(screen1_detector)
+
+        fSDM.AddNewDetector(screen2_detector)
+        self.logic_screen2.SetSensitiveDetector(screen2_detector)
 
         
 
