@@ -41,7 +41,9 @@ class ScreenGeometry(G4VUserDetectorConstruction):
         '''
         # Логика формирования экранов, по хорошему, конечно, стоит вынести это в отдельный метод
         materials = self.tp.readMaterials()
-        self.test_material
+        element = nist.FindOrBuildElement(symb='Al', isotopes=False)
+        print('=========================ELEMENT:===================')
+        print(element)
         '''
         self.material_list = []
         for mat in materials:

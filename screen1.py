@@ -64,31 +64,42 @@ class ScreenGeometry(G4VUserDetectorConstruction):
             checkOverlaps
         )
 
-        # Второй экран
-        self.solid_screen2 = G4Box("Screen2", 0.5 * screen_detXY, 0.5 * screen_detXY, 0.5 * screen2_detZ)
-        self.logic_screen2 = G4LogicalVolume(self.solid_screen2, mat2, "Screen2")
-        self.phys_screen2 = G4PVPlacement(
-            None,
-            G4ThreeVector(0, 0, screen_coord + screen1_detZ * 0.5 + 0.5 * screen2_detZ),
-            self.logic_screen2,
-            "Screen2",
-            logic_world,
-            0,
-            checkOverlaps
-        )
+        elem_name1 = 'Aluminium'
+        elem_symbol1 = 'Al'
+        elem_atomic_number1 = 13
+        elem_density1 = 2.7
+        elem_aem1 = 26.981
+        elem_perc1 = 6
+        #G4Element
+        element1 = nist.FindOrBuildElement(elem_symbol1)
 
-        # Третий экран
-        self.solid_screen3 = G4Box("Screen3", 0.5 * screen_detXY, 0.5 * screen_detXY, 0.5 * screen3_detZ)
-        self.logic_screen3 = G4LogicalVolume(self.solid_screen3, mat3, "Screen3")
-        self.phys_screen3 = G4PVPlacement(
-            None,
-            G4ThreeVector(0, 0, screen_coord + 0.5 * screen1_detZ + screen2_detZ + 0.5 * screen3_detZ),
-            self.logic_screen3,
-            "Screen3",
-            logic_world,
-            0,
-            checkOverlaps
-        )
+        elem_name2 = 'Titanium'
+        elem_symbol2 = 'Ti'
+        elem_atomic_number2 = 22
+        elem_density2 = 4.54
+        elem_aem2 = 47.867
+        elem_perc2 = 94
+
+        element2 = nist.FindOrBuildElement(elem_symbol2)
+
+        with open('log.txt', 'w+') as f:
+            f.write(element1.GetName() + '\n')
+            f.write(str(element1.GetIndex()) + '\n')
+            f.write(str(element1.GetAtomicMassAmu())+'\n')
+
+            f.write(element2.GetName() + '\n')
+            f.write(str(element2.GetIndex()) + '\n')
+            f.write(str(element2.GetAtomicMassAmu())+'\n')
+        
+        avg_density = 4.43
+        material = G4Material('ВТ5Л', avg_density * g/cm3, 2)
+        material.AddElement(element1, 6*perCent)
+        material.AddElement(element2, 94*perCent)
+
+        
+
+        
+        
 
         return phys_world
 
@@ -99,22 +110,12 @@ class ScreenGeometry(G4VUserDetectorConstruction):
         screen1_detector_name = "Screen1_Detector"
         screen1_detector = ScreenDetector(screen1_detector_name)
 
-        screen2_detector_name = "Screen2_Detector"
-        screen2_detector = ScreenDetector(screen2_detector_name)
-
-        screen3_detector_name = "Screen3_Detector"
-        screen3_detector = ScreenDetector(screen3_detector_name)
 
         # Добавляем их в менеджер детекторов
         fSDM.AddNewDetector(screen1_detector)
         self.logic_screen1.SetSensitiveDetector(screen1_detector)
 
-        fSDM.AddNewDetector(screen2_detector)
-        self.logic_screen2.SetSensitiveDetector(screen2_detector)
-
-        fSDM.AddNewDetector(screen3_detector)
-        self.logic_screen3.SetSensitiveDetector(screen3_detector)
-
+        
 
 class ScreenDetector(G4VSensitiveDetector):
 
