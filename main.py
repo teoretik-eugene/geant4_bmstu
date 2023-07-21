@@ -10,6 +10,10 @@ class ScreenGeometry(G4VUserDetectorConstruction):
         self.ds = ds = DataServer()
         self.tp = TrimParser(data=ds.get_current_task_to_json(task_id))
 
+        # Сделаю тут вывод некоторых данных  в файл
+        with open('out.txt', 'w+') as f:
+            f.write('\t\tOutput data: \n')
+
     # TODO реализовать логику создания экранов/слоев из запроса
     def Construct(self) -> G4VPhysicalVolume:
         
@@ -76,6 +80,7 @@ class ScreenGeometry(G4VUserDetectorConstruction):
                 # avg_density = elem_perc1 * elem_density1 + elem_perc2 * elem_density2
                 avg_density += _[1] * _[2]
             
+            # Создаем материал
             components = len(element_list)
             material = G4Material(mat_name, avg_density*g/cm3, components)
             for _ in element_list:
@@ -87,6 +92,7 @@ class ScreenGeometry(G4VUserDetectorConstruction):
         screen_detXY = 250 * mm
         screen_coord = 15 * mm
 
+        # Создаем экраны и помещаем в лист логические объемы, чтобы потом их использовать в SD
         self.screen_list = []
         num = 0
         for mat in material_list:
@@ -106,20 +112,72 @@ class ScreenGeometry(G4VUserDetectorConstruction):
                 checkOverlaps
             )
             screen_coord += screen_width
-            self.screen_list.append(phys_screen)
+            self.screen_list.append(logic_screen)
 
 
         return phys_world
+    
+    def ConstructSDandField(self) -> None:
+        fSDM = G4SDManager.GetSDMpointer()
+
+        screen_ls = self.screen_list
+        
+        num = 0
+        for sc in screen_ls:
+            screen_detector_name = f'Screen_Detector-{num}'
+            screen_detector = ScreenSensitiveDetector(screen_detector_name)
+            fSDM.AddNewDetector(screen_detector)
+            sc.SetSensitiveDetector(screen_detector)
+
+
+
     
 class ScreenSensitiveDetector(G4VSensitiveDetector):
 
     def __init__(self, name: str):
         super().__init__(name)
 
-    def ProcessHits(self, arg0: G4Step, arg1: G4TouchableHistory) -> bool:
+    def ProcessHits(self, aStep: G4Step, hist: G4TouchableHistory) -> bool:
+        edep = aStep.GetTotalEnergyDeposit()
+
+        track = aStep.GetTrack()
+
+        kinetic = aStep.GetTrack().GetKineticEnergy()
         
-        
+        if(kinetic == 0 and track.GetTrackID() == 1):
+            with open('out.txt', 'a') as f:
+                f.write(f'{track.GetTrackID()}:\t{str(track.GetVolume().GetName())}\n')
+
+        newHit = TrackerHit(aStep.GetTrack().GetTrackID,
+                            edep,
+                            aStep.GetPostStepPoint().GetPosition(),
+                            aStep.GetPostStepPoint().GetKineticEnergy())
         return True
+    
+
+class TrackerHit(G4VHit):
+
+    def __init__(self, trackID, edep, pos, kinetic) -> None:
+        super().__init__()
+        self.fTrackID = trackID
+        self.fEdep = edep
+        self.fPos = pos
+        self.fKinetic = kinetic
+
+    def Draw(self) -> None:
+        vVisManager = G4VVisManager.GetConcreteInstance()
+        if vVisManager != None:
+            circle = G4Circle(self.fPos)
+            circle.SetScreenSize(4)
+            circle.SetFillStyle(G4Circle.filled)
+            colour = G4Colour(1, 0, 0)
+            attribs = G4VisAttributes()
+            attribs.SetColor(colour)
+            circle.SetVisAttributes(attribs)
+            vVisManager.Draw(circle)
+
+    def Print(self) -> None:
+        print(f"TrackID: {self.fTrackID}  =====  Edep: {self.fEdep}")
 
 
 class PrimaryGeneration(G4VUserPrimaryGeneratorAction):
@@ -134,7 +192,7 @@ class PrimaryGeneration(G4VUserPrimaryGeneratorAction):
 
         self.fParticleGun.SetParticleDefinition(particle)
         self.fParticleGun.SetParticleMomentumDirection(G4ThreeVector(0., 0., 1.0))
-        self.fParticleGun.SetParticleEnergy(4 * MeV)
+        self.fParticleGun.SetParticleEnergy(20 * MeV)
 
     def GeneratePrimaries(self, anEvent: G4Event) -> None:
 
@@ -161,7 +219,7 @@ if __name__ == '__main__':
     # Создаем объект класса, который будет общаться с серваком
     #ds = DataServer()
     #tp = TrimParser(data=ds.get_current_task_to_json(9))
-    task_id = 170
+    task_id = 9
     
     runManager: G4RunManager = G4RunManagerFactory.CreateRunManager(G4RunManagerType.Serial)
     
@@ -174,8 +232,9 @@ if __name__ == '__main__':
     runManager.SetUserInitialization(ActionInitialization())
 
     runManager.Initialize()
-    #runManager.BeamOn(10)
+    runManager.BeamOn(50)
 
+    '''
     ui = G4UIExecutive(len(sys.argv), sys.argv)
     visManager = G4VisExecutive()
     visManager.Initialize()
@@ -184,9 +243,9 @@ if __name__ == '__main__':
     UImanager.ApplyCommand('/control/execute init_vis.mac')
     UImanager.ApplyCommand('/gun/particle proton')
     UImanager.ApplyCommand('/gun/energy 40 MeV')
-    UImanager.ApplyCommand('/tracking/verbose 0')
+    UImanager.ApplyCommand('/tracking/verbose 1')
     UImanager.ApplyCommand('/run/beamOn 50')
     ui.SessionStart()
     sys.exit()
-
+    '''
 
