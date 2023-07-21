@@ -192,7 +192,7 @@ class PrimaryGeneration(G4VUserPrimaryGeneratorAction):
 
         self.fParticleGun.SetParticleDefinition(particle)
         self.fParticleGun.SetParticleMomentumDirection(G4ThreeVector(0., 0., 1.0))
-        self.fParticleGun.SetParticleEnergy(20 * MeV)
+        self.fParticleGun.SetParticleEnergy(40 * MeV)
 
     def GeneratePrimaries(self, anEvent: G4Event) -> None:
 
