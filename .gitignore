@@ -5,3 +5,4 @@ q.txt
 *.macro
 log.*
 out.*
+test.py
