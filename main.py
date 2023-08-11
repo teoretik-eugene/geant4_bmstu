@@ -54,6 +54,7 @@ class ScreenGeometry(G4VUserDetectorConstruction):
             mat_name = mat.get('Name')
             mat_width = (float(mat.get('Width')) / 1000) * mm
             
+            
             self.screen_info.get('Materials').append({'Name': mat_name})
             self.screen_info.get('Materials')[indx]['Stuck_count'] = 0
             indx += 1
@@ -159,7 +160,7 @@ class ScreenSensitiveDetector(G4VSensitiveDetector):
         
         # Если кинетическая энергия у первичной частицы 0, то записываем в файл (просто тест)
         if(kinetic == 0 and track.GetTrackID() == 1 and 
-           track.GetDefinition().GetParticleName() == 'proton'):
+           track.GetDefinition().GetParticleName() == 'He3'):
             screen_num = int(track.GetVolume().GetName()[9::])
             self.screen_info.get('Materials')[screen_num]['Stuck_count'] += 1
             with open('out.txt', 'a') as f:
@@ -207,11 +208,11 @@ class PrimaryGeneration(G4VUserPrimaryGeneratorAction):
 
         particle_table = G4ParticleTable.GetParticleTable()
         #particle = particle_table.FindAntiParticle("proton")
-        particle = particle_table.FindParticle('proton')
+        particle = particle_table.FindParticle('He3')
 
         self.fParticleGun.SetParticleDefinition(particle)
         self.fParticleGun.SetParticleMomentumDirection(G4ThreeVector(0., 0., 1.0))
-        self.fParticleGun.SetParticleEnergy(50 * MeV)
+        self.fParticleGun.SetParticleEnergy(30 * MeV)
 
     def GeneratePrimaries(self, anEvent: G4Event) -> None:
 
@@ -242,7 +243,7 @@ if __name__ == '__main__':
     # Создаем объект класса, который будет общаться с серваком
     #ds = DataServer()
     #tp = TrimParser(data=ds.get_current_task_to_json(9))
-    task_id = 9
+    task_id = 170
     screen_info = {}        # словарь для записи информации о каждом экране
     event_num = 100          # количество генерируемых событий
     total_particles = event_num     # общий подсчет частиц
