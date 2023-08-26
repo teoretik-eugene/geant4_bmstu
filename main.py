@@ -3,13 +3,15 @@ from geant4_pybind import G4Event, G4Step, G4TouchableHistory, G4VPhysicalVolume
 from DataServer import DataServer
 from TrimParser import TrimParser
 import sys
+import pyvista
+import numpy as np
 
 class ScreenGeometry(G4VUserDetectorConstruction):
     # Убрали параметр taskId
     def __init__(self, data, screen_info: dict) -> None:
         super().__init__()
-        #self.ds = DataServer()
-        #self.tp = TrimParser(data=self.ds.get_current_task_to_json(task_id))
+        # self.ds = DataServer()
+        # self.tp = TrimParser(data=self.ds.get_current_task_to_json(task_id))
         self.tp = TrimParser(data)
         self.screen_info = screen_info
 
@@ -19,7 +21,7 @@ class ScreenGeometry(G4VUserDetectorConstruction):
 
     # TODO реализовать логику создания экранов/слоев из запроса
     def Construct(self) -> G4VPhysicalVolume:
-        
+
         nist = G4NistManager.Instance()
         checkOverlaps = True
 
@@ -55,8 +57,7 @@ class ScreenGeometry(G4VUserDetectorConstruction):
         for mat in materials:
             mat_name = mat.get('Name')
             mat_width = (float(mat.get('Width')) / 1000) * mm
-            
-            
+
             self.screen_info.get('Materials').append({'Name': mat_name})
             self.screen_info.get('Materials')[indx]['Primary_stuck_count'] = 0
             self.screen_info.get('Materials')[indx]['Secondary_stuck_count'] = 0
@@ -64,7 +65,7 @@ class ScreenGeometry(G4VUserDetectorConstruction):
 
             elements = mat.get('Elements')
             element_list = []
-            
+
             for elem in elements:
                 elem_name = elem.get('Name')
                 elem_symbol = elem.get('Symbol')
@@ -72,34 +73,33 @@ class ScreenGeometry(G4VUserDetectorConstruction):
                 elem_density = float(elem.get('Density'))
                 elem_aem = float(elem.get('Standard_atomic_weight'))
                 elem_perc = float(elem.get('Percentage'))
-                #мб попробовать другое название вбивать?
-                #element = nist.FindOrBuildElement(elem_atomic_number, False)
+                # мб попробовать другое название вбивать?
+                # element = nist.FindOrBuildElement(elem_atomic_number, False)
                 element = nist.FindOrBuildElement(elem_symbol)
-                #print(f'elem: {element}')
+                # print(f'elem: {element}')
                 element_list.append([element, elem_perc, elem_density])
-            
+
             # Высчитывание процента
             total_perc = 0
             # Общий относительный процент
             for _ in element_list:
                 total_perc += _[1]
-            
+
             avg_density = 0
             for _ in element_list:
                 # Описание действия: elem_perc = elem_perc / total
                 _[1] = _[1] / total_perc
-                #Описание действия: avg_density = elem_perc1 * elem_density1 + elem_perc2 * elem_density2
+                # Описание действия: avg_density = elem_perc1 * elem_density1 + elem_perc2 * elem_density2
                 avg_density += _[1] * _[2]
-            
+
             # Создаем материал
             components = len(element_list)
-            material = G4Material(mat_name, avg_density*g/cm3, components)
+            material = G4Material(mat_name, avg_density * g / cm3, components)
             for _ in element_list:
                 material.AddElement(_[0], frac=_[1])
             print(material.GetName())
             material_list.append([material, mat_width, mat_name])
 
-        
         screen_detXY = 250 * mm
         screen_coord = 15 * mm
 
@@ -111,7 +111,7 @@ class ScreenGeometry(G4VUserDetectorConstruction):
             screen_width = mat[1]
             screen_material = mat[0]
             num += 1
-            solid_screen = G4Box(screen_name, 0.5*screen_detXY, 0.5*screen_detXY, 0.5*screen_width)
+            solid_screen = G4Box(screen_name, 0.5 * screen_detXY, 0.5 * screen_detXY, 0.5 * screen_width)
             logic_screen = G4LogicalVolume(solid_screen, screen_material, screen_name)
             phys_screen = G4PVPlacement(
                 None,
@@ -127,16 +127,14 @@ class ScreenGeometry(G4VUserDetectorConstruction):
             # Создаем лист длиной как лист экранов
             # В этом листе будет храниться количество застрявших частиц в слое экрана
             self.particles_count = [0] * len(self.screen_list)
-            
-
 
         return phys_world
-    
+
     def ConstructSDandField(self) -> None:
         fSDM = G4SDManager.GetSDMpointer()
 
         screen_ls = self.screen_list
-        
+
         num = 0
         for sc in screen_ls:
             screen_detector_name = f'Screen_Detector - {num}'
@@ -150,38 +148,54 @@ class ScreenEventAction(G4UserEventAction):
     def __init__(self) -> None:
         super().__init__()
         self.eventId = None
-    
+
     def BeginOfEventAction(self, anEvent: G4Event) -> None:
         self.eventId = anEvent.GetEventID()
-        
-    
+
     def EndOfEventAction(self, anEvent: G4Event) -> None:
         self.eventId = None
 
+
 class ScreenSteppingAction(G4UserSteppingAction):
-    def __init__(self, primaryParticlesOutId: list, secondaryParticlesOutId: list, screen_end, eventAction: ScreenEventAction) -> None:
+    def __init__(self, primaryParticlesOutId: list, secondaryParticlesOutId: list, screen_end,
+                 eventAction: ScreenEventAction) -> None:
         super().__init__()
         self.screen_end_coord = screen_end
         self.eventAction = eventAction
 
+    global df
+    df = {}
     def UserSteppingAction(self, step: G4Step) -> None:
         track = step.GetTrack()
         pos_x = step.GetPostStepPoint().GetPosition().x
+        pos_y = step.GetPostStepPoint().GetPosition().y
+        pos_z = step.GetPostStepPoint().GetPosition().z
 
-        eventTrack = [self.eventAction.eventId, track.GetTrackID()]
+        eventTrack = (self.eventAction.eventId, track.GetTrackID())
 
         # Проверка вылетевших первичных частиц
         if pos_x > self.screen_end_coord and not (eventTrack in primaryParticlesOutId) \
-        and track.GetTrackID() == 1:
+                and track.GetTrackID() == 1:
             primaryParticlesOutId.append(eventTrack)
-        
-        # Проверка вылетевших вторичных частиц
-        if pos_x > self.screen_end_coord and not(eventTrack in secondaryParticlesOutId) \
-        and track.GetTrackID() > 1:
-            secondaryParticlesOutId.append(eventTrack)
-        
 
-    
+        # Проверка вылетевших вторичных частиц
+        if pos_x > self.screen_end_coord and not (eventTrack in secondaryParticlesOutId) \
+                and track.GetTrackID() > 1:
+            secondaryParticlesOutId.append(eventTrack)
+
+        # Создание json для визуализации
+        if eventTrack not in df:
+            df[eventTrack] = []
+        df[eventTrack].append([pos_x, pos_y, pos_z])
+        # df.append({
+        #     "event_id": eventTrack[0],
+        #     "track_id": eventTrack[1],
+        #     "X": pos_x,
+        #     "Y": pos_y,
+        #     "Z": pos_z,
+        # })
+
+
 class ScreenSensitiveDetector(G4VSensitiveDetector):
 
     def __init__(self, name: str, screen_info: dict):
@@ -194,27 +208,29 @@ class ScreenSensitiveDetector(G4VSensitiveDetector):
         track = aStep.GetTrack()
 
         kinetic = aStep.GetTrack().GetKineticEnergy()
-        
+
         # Если кинетическая энергия у первичной частицы 0, то записываем в файл (просто тест)
-        #if(kinetic == 0 and track.GetTrackID() == 1 and track.GetDefinition().GetParticleName() == 'He3'):
-        if(kinetic == 0 and track.GetTrackID() == 1):
+        # if(kinetic == 0 and track.GetTrackID() == 1 and track.GetDefinition().GetParticleName() == 'He3'):
+        if (kinetic == 0 and track.GetTrackID() == 1):
             screen_num = int(track.GetVolume().GetName()[9::])
             self.screen_info.get('Materials')[screen_num]['Primary_stuck_count'] += 1
             with open('out.txt', 'a') as f:
-                f.write(f'{track.GetTrackID()}:\t{str(track.GetVolume().GetName())}\t{track.GetDefinition().GetParticleName()}\n')
+                f.write(
+                    f'{track.GetTrackID()}:\t{str(track.GetVolume().GetName())}\t{track.GetDefinition().GetParticleName()}\n')
 
-        if(kinetic == 0 and track.GetTrackID() > 1):
+        if (kinetic == 0 and track.GetTrackID() > 1):
             screen_num = int(track.GetVolume().GetName()[9::])
             self.screen_info.get('Materials')[screen_num]['Secondary_stuck_count'] += 1
             with open('out.txt', 'a') as f:
-                f.write(f'{track.GetTrackID()}:\t{str(track.GetVolume().GetName())}\t{track.GetDefinition().GetParticleName()}\n')
+                f.write(
+                    f'{track.GetTrackID()}:\t{str(track.GetVolume().GetName())}\t{track.GetDefinition().GetParticleName()}\n')
 
         newHit = TrackerHit(aStep.GetTrack().GetTrackID,
                             edep,
                             aStep.GetPostStepPoint().GetPosition(),
                             aStep.GetPostStepPoint().GetKineticEnergy())
         return True
-    
+
 
 class TrackerHit(G4VHit):
 
@@ -250,7 +266,7 @@ class PrimaryGeneration(G4VUserPrimaryGeneratorAction):
         self.fParticleGun = G4ParticleGun(n_particles)
 
         particle_table = G4ParticleTable.GetParticleTable()
-        #particle = particle_table.FindAntiParticle("proton")
+        # particle = particle_table.FindAntiParticle("proton")
         particle = particle_table.FindParticle('He3')
 
         self.fParticleGun.SetParticleDefinition(particle)
@@ -270,7 +286,7 @@ class PrimaryGeneration(G4VUserPrimaryGeneratorAction):
             world_half_len = world_box.GetZHalfLength()  # эту команду vs code не видит
 
         # Следует выбрать мб норм расстояние?
-        self.fParticleGun.SetParticlePosition(G4ThreeVector(0, 0, -50*cm ))
+        self.fParticleGun.SetParticlePosition(G4ThreeVector(0, 0, -50 * cm))
         self.fParticleGun.GeneratePrimaryVertex(anEvent)
 
 
@@ -283,30 +299,32 @@ class ActionInitialization(G4VUserActionInitialization):
         self.screen_cord = (15 + tp.sumWidth()) * mm
 
     def Build(self) -> None:
-        #self.SetUserAction(SteppingAction())
+        # self.SetUserAction(SteppingAction())
         self.SetUserAction(PrimaryGeneration())
         eventAction = ScreenEventAction()
         self.SetUserAction(eventAction)
-        self.SetUserAction(ScreenSteppingAction(primaryParticlesOutId, secondaryParticlesOutId, self.screen_cord, eventAction))
+        self.SetUserAction(
+            ScreenSteppingAction(primaryParticlesOutId, secondaryParticlesOutId, self.screen_cord, eventAction))
+
 
 if __name__ == '__main__':
     # Создаем объект класса, который будет общаться с серваком
     ds = DataServer()
-    #tp = TrimParser(data=ds.get_current_task_to_json(9))
-    task_id = 9    # примеры тасков: 9, 170
+    # tp = TrimParser(data=ds.get_current_task_to_json(9))
+    task_id = 9  # примеры тасков: 9, 170
     data = ds.get_current_task_to_json(task_id)
-    screen_info = {}        # словарь для записи информации о каждом экране
+    screen_info = {}  # словарь для записи информации о каждом экране
 
     primaryParticlesOutId = []
     secondaryParticlesOutId = []
 
-    event_num = 100          # количество генерируемых событий
-    total_particles = event_num     # общий подсчет частиц
-    
+    event_num = 1  # количество генерируемых событий
+    total_particles = event_num  # общий подсчет частиц
+
     runManager: G4RunManager = G4RunManagerFactory.CreateRunManager(G4RunManagerType.Serial)
-    
+
     runManager.SetUserInitialization(ScreenGeometry(data=data, screen_info=screen_info))
-    
+
     physics = FTFP_BERT()
     physics.SetVerboseLevel(1)
     runManager.SetUserInitialization(physics)
@@ -317,18 +335,26 @@ if __name__ == '__main__':
 
     # Количество запускаемых событий и общее количество первичных запускаемых части
     runManager.BeamOn(event_num)
-    
+
     screen_particles = {}
     screen_particles['Screen'] = screen_info
     screen_particles['Total_particles'] = total_particles
-    #screen_particles['Total_out_particles'] = len(p)
+    # screen_particles['Total_out_particles'] = len(p)
     screen_particles['Total_out_primary_particles'] = len(primaryParticlesOutId)
     screen_particles['Total_out_secondary_particles'] = len(secondaryParticlesOutId)
-    
+
+    # Визуализация
+    pl = pyvista.Plotter()
+    for key in df:
+        points = np.array(df[key])
+        actor = pl.add_lines(points, color='purple', width=3, connected=True)
+    pl.camera_position = 'xy'
+    pl.show()
+
     # Сформировать ответ
     ds = DataServer()
     print(ds.to_json(screen_particles))
-    #print(particlesOutId)
+    # print(particlesOutId)
 
     '''
     ui = G4UIExecutive(len(sys.argv), sys.argv)
@@ -344,4 +370,3 @@ if __name__ == '__main__':
     ui.SessionStart()
     sys.exit()
     '''
-
