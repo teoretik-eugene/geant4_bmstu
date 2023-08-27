@@ -349,6 +349,7 @@ if __name__ == '__main__':
         points = np.array(df[key])
         actor = pl.add_lines(points, color='purple', width=3, connected=True)
     pl.camera_position = 'xy'
+    pl.export_html(f'{task_id}_{event_num}.html')
     pl.show()
 
     # Сформировать ответ
