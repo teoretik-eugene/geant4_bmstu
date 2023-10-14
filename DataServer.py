@@ -1,5 +1,6 @@
 import os
 import requests
+import json
 
 class DataServer:
 
@@ -27,5 +28,9 @@ class DataServer:
             return task_data
         else:
             # Подумать как тут реализовать обработку ошибки запроса
-            return None     
-        
+            return None   
+
+    def to_json(self, screen_dict: dict):
+        r = json.dumps(screen_dict)
+        load = json.loads(r)
+        return load        
