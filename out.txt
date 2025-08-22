@@ -1,1 +1,12 @@
-{'Screen': {'Materials': [{'Name': 'ВТ5Л', 'Primary_stuck_count': 0, 'Secondary_stuck_count': 13}, {'Name': 'W', 'Primary_stuck_count': 4, 'Secondary_stuck_count': 86}, {'Name': 'Al', 'Primary_stuck_count': 0, 'Secondary_stuck_count': 0}]}, 'Total_particles': 10, 'Total_out_primary_particles': 3, 'Total_out_secondary_particles': 21}
+		Output data: 
+1:	Screen-- 0	He3
+1:	Screen-- 0	He3
+1:	Screen-- 0	He3
+1:	Screen-- 0	He3
+1:	Screen-- 0	He3
+749:	Screen-- 0	e-
+1:	Screen-- 0	He3
+1:	Screen-- 0	He3
+1:	Screen-- 0	He3
+1:	Screen-- 0	He3
+1:	Screen-- 0	He3

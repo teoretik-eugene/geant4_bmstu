@@ -98,7 +98,7 @@ class ScreenGeometry(G4VUserDetectorConstruction):
             material = G4Material(mat_name, avg_density * g / cm3, components)
             for _ in element_list:
                 material.AddElement(_[0], frac=_[1])
-            print(material.GetName())
+            print('material name: ', material.GetName())
             material_list.append([material, mat_width, mat_name])
 
         screen_detXY = 250 * mm
@@ -146,7 +146,7 @@ class ScreenGeometry(G4VUserDetectorConstruction):
         num = 0
         for sc in screen_ls:
             screen_detector_name = f'Screen_Detector - {num}'
-            screen_detector = ScreenSensitiveDetector(screen_detector_name, screen_info)
+            screen_detector = ScreenSensitiveDetector(screen_detector_name, self.screen_info)
             fSDM.AddNewDetector(screen_detector)
             sc.SetSensitiveDetector(screen_detector)
 
@@ -301,11 +301,13 @@ class PrimaryGeneration(G4VUserPrimaryGeneratorAction):
 
 class ActionInitialization(G4VUserActionInitialization):
 
-    def __init__(self, data: dict) -> None:
+    def __init__(self, data: dict, primary_particles_out: list, secondary_particles_out: list) -> None:
         super().__init__()
         tp = TrimParser(data)
         # Координата крайней поверхности экранов
         self.screen_cord = (15 + tp.sumWidth()) * mm
+        self.primary_particles_out = primary_particles_out
+        self.secondary_particles_out = secondary_particles_out
 
     def Build(self) -> None:
         # self.SetUserAction(SteppingAction())
@@ -313,7 +315,116 @@ class ActionInitialization(G4VUserActionInitialization):
         eventAction = ScreenEventAction()
         self.SetUserAction(eventAction)
         self.SetUserAction(
-            ScreenSteppingAction(primaryParticlesOutId, secondaryParticlesOutId, self.screen_cord, eventAction))
+            ScreenSteppingAction(
+                self.primary_particles_out, 
+                self.secondary_particles_out, 
+                self.screen_cord, 
+                eventAction
+            )
+        )
+
+class SimulationRunner:
+    def __init__(self):
+        self.screen_info = {}
+        self.primaryParticlesOutId = []
+        self.secondaryParticlesOutId = []
+        self.df = {}
+        self.s_info = []
+
+    def run_simulation(self, task_id, particle_type, energy, events_count):
+        try:
+            # Инициализация данных
+            ds = DataServer()
+            data = ds.get_current_task_to_json(task_id)
+            self.screen_info = {}
+            
+            # Настройка симуляции
+            # runManager = G4RunManagerFactory.CreateRunManager(G4RunManagerType.Serial)
+            runManager: G4RunManager = G4RunManagerFactory.CreateRunManager(G4RunManagerType.Serial)
+
+            runManager.SetUserInitialization(ScreenGeometry(data=data, screen_info=self.screen_info))
+            print('init physics')
+            physics = FTFP_BERT()
+            physics.SetVerboseLevel(1)
+            runManager.SetUserInitialization(physics)
+            print('init user initialization')
+            runManager.SetUserInitialization(
+                ActionInitialization(
+                    data=data,
+                    primary_particles_out=self.primaryParticlesOutId,
+                    secondary_particles_out=self.secondaryParticlesOutId
+                )
+            )
+            print('init run')
+            runManager.Initialize()
+            runManager.BeamOn(events_count)
+            print('end of modeling')
+            # Формирование результатов
+            result = {
+                'Screen': self.screen_info,
+                'Total_particles': events_count,
+                'Total_out_primary_particles': len(self.primaryParticlesOutId),
+                'Total_out_secondary_particles': len(self.secondaryParticlesOutId)
+            }
+            
+            return result
+            
+        except Exception as e:
+            raise RuntimeError(f"Simulation failed: {str(e)}")
+
+def run_simulation_task_by_id(task_id: int, particle_type: str, energy: float, events_count: int) :
+    data_server = DataServer()
+    data = data_server.get_current_task_to_json(task_id)
+    screen_info = {}
+    primaryParticlesOutId = []
+    secondaryParticlesOutId = []
+    event_num = events_count # количество генерируемых событий
+    total_particles = event_num  # общий подсчет частиц
+    
+    runManager: G4RunManager = G4RunManagerFactory.CreateRunManager(G4RunManagerType.Serial)
+
+    runManager.SetUserInitialization(ScreenGeometry(data=data, screen_info=screen_info))
+
+    physics = FTFP_BERT()
+    physics.SetVerboseLevel(1)
+    runManager.SetUserInitialization(physics)
+
+    runManager.SetUserInitialization(
+        ActionInitialization(
+            data=data,
+            primary_particles_out=primaryParticlesOutId,
+            secondary_particles_out=secondaryParticlesOutId
+            )
+        )
+
+    runManager.Initialize()
+
+    # Количество запускаемых событий и общее количество первичных запускаемых части
+    runManager.BeamOn(event_num)
+
+    result = {
+        'Screen': screen_info,
+        'Total_particles': total_particles,
+        'Total_out_primary_particles': len(primaryParticlesOutId),
+        'Total_out_secondary_particles': len(secondaryParticlesOutId)
+    }
+
+    # pl = pyvista.Plotter()
+    # for key in df:
+    #     points = np.array(df[key])
+    #     actor = pl.add_lines(points, color='purple', width=3, connected=True)
+    # for i in s_info:
+    #     points = np.array(i)
+    #     actor = pl.add_lines(points, color='blue', width=2, connected=True)
+    # pl.camera_position = 'xy'
+    # pl.export_html(f'{task_id}_{event_num}_{main_part}.html')
+    # #pl.show()
+
+    # Сформировать ответ
+    ds = DataServer()
+    #print(ds.to_json(screen_particles))
+
+    return result
 
 
 if __name__ == '__main__':
@@ -327,7 +438,7 @@ if __name__ == '__main__':
     primaryParticlesOutId = []
     secondaryParticlesOutId = []
 
-    event_num = 3 # количество генерируемых событий
+    event_num = 10 # количество генерируемых событий
     total_particles = event_num  # общий подсчет частиц
 
     runManager: G4RunManager = G4RunManagerFactory.CreateRunManager(G4RunManagerType.Serial)
@@ -338,7 +449,9 @@ if __name__ == '__main__':
     physics.SetVerboseLevel(1)
     runManager.SetUserInitialization(physics)
 
-    runManager.SetUserInitialization(ActionInitialization(data=data))
+    runManager.SetUserInitialization(ActionInitialization(data=data, 
+                                                          primary_particles_out=primaryParticlesOutId, 
+                                                          secondary_particles_out=secondaryParticlesOutId))
 
     runManager.Initialize()
 
@@ -383,3 +496,4 @@ if __name__ == '__main__':
     ui.SessionStart()
     sys.exit()
     '''
+    pass

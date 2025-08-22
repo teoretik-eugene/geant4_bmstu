@@ -9,9 +9,8 @@ class DataServer:
         self.current_task_url = 'http://trim.kv-projects.ru/PHP_back/GetCurrentTaskFromPool.php'
         self.current_task_url_json = \
         'http://trim.kv-projects.ru/PHP_back/GetCurrentJSONTaskFromPool.php?ID='
+        # self.current_task = "http://trim.kv-projects.ru/PHP_back/GetCurrentJSONTaskFromPool.php?ID="
         self.current_directory = os.getcwd()
-
-
 
     def get_current_task_text(self, id: int) -> str:
         response = requests.get(f'{self.current_task_url}?ID={id}')
