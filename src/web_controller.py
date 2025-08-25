@@ -68,7 +68,7 @@ def run_simulation_process(simulation_id: str, config_dict: dict, result_dir: st
         
         # Команда для запуска симуляции
         cmd = [
-            'python', '-c', 
+            'python3', '-c', 
             f'''
 import json
 import sys
