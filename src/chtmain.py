@@ -74,13 +74,25 @@ class TrackCollector:
     def __init__(self, enabled: bool = False) -> None:
         self.enabled = enabled
         self._data: Dict[Tuple[int, int], List[Tuple[float, float, float]]] = {}
-    def add(self, event_id: int, track_id: int, pos: g4.G4ThreeVector) -> None:
+        self._particle_types: Dict[Tuple[int, int], str] = {}  # Новое: храним типы частиц
+    
+    def add(self, event_id: int, track_id: int, pos: g4.G4ThreeVector, particle_type: str = None) -> None:
         if not self.enabled:
             return
         self._data.setdefault((event_id, track_id), []).append((pos.x, pos.y, pos.z))
+        if particle_type and (event_id, track_id) not in self._particle_types:
+            self._particle_types[(event_id, track_id)] = particle_type
+    
+    def get_particle_type(self, event_id: int, track_id: int) -> str:
+        return self._particle_types.get((event_id, track_id), "unknown")
+    
     @property
     def data(self):
         return self._data
+    
+    @property
+    def particle_types(self):
+        return self._particle_types
 
 # -----------------------------
 # Геометрия
@@ -194,12 +206,35 @@ class ScreenSteppingAction(g4.G4UserSteppingAction):
         self.screens_end_z_mm = screens_end_z_mm
         self.event_action = event_action
         self.tracks = tracks
+    
     def UserSteppingAction(self, step):
         post = step.GetPostStepPoint()
         pos = post.GetPosition()
         track = step.GetTrack()
+        
+        # Получаем тип частицы из Geant4 - ИСПРАВЛЕННАЯ ВЕРСИЯ
+        particle_name = "unknown"
+        try:
+            # Попробуем разные способы получения определения частицы
+            particle_def = track.GetDefinition()  # Основной метод в pybind
+            if particle_def:
+                particle_name = particle_def.GetParticleName()
+        except AttributeError:
+            try:
+                # Альтернативный способ
+                particle_def = track.GetDynamicParticle().GetDefinition()
+                if particle_def:
+                    particle_name = particle_def.GetParticleName()
+            except:
+                # Если не получается, используем track_id для определения
+                if track.GetTrackID() == 1:
+                    particle_name = "primary"
+                else:
+                    particle_name = "secondary"
+        
         if self.event_action.event_id is not None:
-            self.tracks.add(self.event_action.event_id, track.GetTrackID(), pos)
+            self.tracks.add(self.event_action.event_id, track.GetTrackID(), pos, particle_name)
+        
         if (pos.z / g4.mm) > self.screens_end_z_mm:
             key = (self.event_action.event_id or -1, track.GetTrackID())
             if track.GetTrackID() == 1:
@@ -254,6 +289,9 @@ class ActionInitialization(g4.G4VUserActionInitialization):
 # Запуск симуляции
 # -----------------------------
 class SimulationRunner:
+    def __init__(self):
+        self._last_tracks = None
+    
     def _load_input(self, cfg):
         if cfg.input_data is not None:
             return cfg.input_data
@@ -271,6 +309,7 @@ class SimulationRunner:
             primary_out = []
             secondary_out = []
             tracks = TrackCollector(enabled=cfg.collect_tracks)
+            self._last_tracks = tracks  # Сохраняем для доступа к типам частиц
             
             run_manager = g4.G4RunManagerFactory.CreateRunManager(g4.G4RunManagerType.Serial)
             _geant4_initialized = True
@@ -328,74 +367,56 @@ def _cleanup_geant4():
 
 atexit.register(_cleanup_geant4)
 
-# -----------------------------
-# Main
-# -----------------------------
+def get_particle_color(particle_name):
+    """Возвращает цвет для конкретного типа частицы"""
+    color_map = {
+        # Первичные частицы
+        "He3": "blue",
+        "alpha": "darkblue",
+        "proton": "red",
+        "neutron": "gray",
+        "e-": "green",
+        "e+": "lightgreen",
+        "gamma": "yellow",
+        "mu-": "purple",
+        "mu+": "violet",
+        "pi+": "orange",
+        "pi-": "darkorange",
+        "kaon+": "brown",
+        "kaon-": "sandybrown",
+        "deuteron": "cyan",
+        "triton": "darkcyan",
+        
+        # По умолчанию
+        "primary": "blue",
+        "unknown": "black"
+    }
+    
+    # Нормализуем имя частицы
+    particle_name = str(particle_name).lower()
+    
+    # Ищем точное совпадение
+    for key, color in color_map.items():
+        if key.lower() == particle_name:
+            return color
+    
+    # Ищем частичное совпадение
+    for key, color in color_map.items():
+        if key.lower() in particle_name or particle_name in key.lower():
+            return color
+    
+    return color_map["unknown"]
 
-# def run_simulation(cfg: SimulationConfig) -> SimulationResult:
-#     # словарь для хранения информации об экранах
-#     screen_info = {}
-
-#     # трекер
-#     tracks = TrackCollector(cfg.collect_tracks)
-
-#     # выходные данные
-#     primary_out = []
-#     secondary_out = []
-
-#     # заранее считаем геометрию (чтобы gun знал где источник)
-#     layout = compute_layout(cfg, cfg.input_data or {"Materials": []})
-
-#     # создаём run manager
-#     run_manager = g4.G4RunManagerFactory.CreateRunManager(g4.G4RunManagerType.Serial)
-
-#     # детектор
-#     det = ScreenGeometry(cfg.input_data or {"Materials": []}, screen_info, cfg)
-#     det._precomputed_layout = layout
-#     run_manager.SetUserInitialization(det)
-
-#     # физика
-#     run_manager.SetUserInitialization(g4.FTFP_BERT())
-
-#     # экшены
-#     run_manager.SetUserInitialization(
-#         ActionInitialization(
-#             cfg.input_data or {"Materials": []},
-#             primary_out,
-#             secondary_out,
-#             cfg.particle,
-#             cfg.energy_mev,
-#             layout,
-#             tracks
-#         )
-#     )
-
-#     run_manager.Initialize()
-#     run_manager.BeamOn(cfg.events)
-
-#     # собираем результат
-#     result = SimulationResult(
-#         screen_info=screen_info,
-#         total_particles=cfg.events,
-#         total_out_primary_particles=len(primary_out),
-#         total_out_secondary_particles=len(secondary_out),
-#         tracks=tracks.data if cfg.collect_tracks else None
-#     )
-#     return result
-
-
-# if __name__ == "__main__":
-#     cfg = SimulationConfig(
-#         task_id=9,
-#         input_data=None,
-#         particle="e-",
-#         energy_mev=60.0,
-#         events=10,
-#         collect_tracks=True,
-#         visualize=True,
-#     )
-#     res = run_simulation(cfg)
-#     print(res.to_dict())
+def export_to_html(plotter, filename="visualization.html"):
+    """Экспортирует сцену PyVista в HTML файл"""
+    try:
+        # Используем экспорт в HTML
+        plotter.export_html(filename)
+        print(f"Визуализация экспортирована в {filename}")
+    except Exception as e:
+        print(f"Ошибка при экспорте в HTML: {e}")
+        # Альтернативный способ через сохранение и встраивание
+        plotter.show(screenshot=filename.replace('.html', '.png'))
 
 def run_simulation(cfg: SimulationConfig) -> SimulationResult:
     runner = SimulationRunner()
@@ -421,27 +442,77 @@ if __name__ == "__main__":
         import pyvista as pv
         layout = compute_layout(cfg, runner._load_input(cfg))
         plotter = pv.Plotter()
+        
         # draw screens
         z_cursor = float(layout["first_screen_front_z_mm"])
-        for mat in res.screen_info["Materials"]:
+        for i, mat in enumerate(res.screen_info["Materials"]):
             th = float(mat["Thickness_mm"])
             center_z = z_cursor + 0.5 * th
             cube = pv.Cube(
                 center=(0, 0, center_z),
-                x_length=cfg.screen_xy_mm * 0.6,  # 60% от реальной ширины
+                x_length=cfg.screen_xy_mm * 0.6,
                 y_length=cfg.screen_xy_mm * 0.6,
                 z_length=th
             )
-            plotter.add_mesh(cube, opacity=0.3)
+            plotter.add_mesh(cube, opacity=0.3, color='lightblue', name=f"Screen_{i}")
             z_cursor += th
 
         # draw source
         source_z = max(layout["first_screen_front_z_mm"] - 10.0, -layout["half_world_z_mm"] + 1.0)
-        plotter.add_mesh(pv.Sphere(center=(0, 0, source_z), radius=0.2))
+        sphere = pv.Sphere(center=(0, 0, source_z), radius=0.2)
+        plotter.add_mesh(sphere, color='red', name="Source")
 
-        # draw tracks
-        for pts in res.tracks.values():
+        # draw tracks with particle-type coloring
+        particle_counts = {}
+        
+        # ИСПРАВЛЕНИЕ: используем tracks из результата симуляции
+        for track_key, pts in res.tracks.items():
             if len(pts) >= 2:
-                plotter.add_mesh(pv.lines_from_points(pts))
+                event_id, track_id = track_key
+                
+                # Получаем тип частицы из TrackCollector
+                # Для этого нужно сохранить tracks объект и передать его
+                particle_name = "unknown"
+                if hasattr(runner, '_last_tracks'):
+                    particle_name = runner._last_tracks.get_particle_type(event_id, track_id)
+                else:
+                    # Альтернатива: определяем по track_id
+                    particle_name = "primary" if track_id == 1 else "secondary"
+                
+                # Считаем статистику по типам частиц
+                particle_counts[particle_name] = particle_counts.get(particle_name, 0) + 1
+                
+                # Получаем цвет для данного типа частицы
+                color = get_particle_color(particle_name)
+                
+                # Определяем толщину линии: первичные частицы толще
+                line_width = 2 if track_id == 1 else 1
+                
+                line = pv.lines_from_points(pts)
+                plotter.add_mesh(
+                    line, 
+                    color=color, 
+                    line_width=line_width,
+                    name=f"{particle_name}_{event_id}_{track_id}"
+                )
+        
+        # Добавляем информационную панель
+        legend_text = "Particle Types:\n"
+        for particle_name, count in particle_counts.items():
+            color = get_particle_color(particle_name)
+            legend_text += f"{particle_name}: {count}\n"
+        
+        plotter.add_text(legend_text, position='upper_right', font_size=8)
+        plotter.add_text(f"Geant4 Simulation: {cfg.particle} at {cfg.energy_mev} MeV", 
+                        position='upper_edge', font_size=10)
         plotter.add_axes()
-        plotter.show()
+        
+        # Экспорт в HTML
+        html_filename = f"simulation_visualization_task_{cfg.task_id}.html"
+        plotter.export_html(html_filename)
+        print(f"Визуализация экспортирована в {html_filename}")
+        
+        # Выводим статистику в консоль
+        print("\nParticle type statistics:")
+        for particle_name, count in sorted(particle_counts.items()):
+            print(f"  {particle_name}: {count} tracks")
