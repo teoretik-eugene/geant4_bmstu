@@ -73,7 +73,7 @@ def run_simulation_process(simulation_id: str, config_dict: dict, result_dir: st
 import json
 import sys
 sys.path.insert(0, ".")
-from chtmain import run_simulation, SimulationConfig
+from main import run_simulation, SimulationConfig
 
 with open("{config_file}", "r") as f:
     config_dict = json.load(f)

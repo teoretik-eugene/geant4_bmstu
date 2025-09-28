@@ -1,0 +1,15 @@
+version: '3.8'
+
+services:
+  geant4-api:
+    build: .
+    container_name: geant4-simulation-api
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./src:/app/src
+    environment:
+      - PYTHONPATH=/app/src
+      - GEANT4_DATA=/app/geant4/data
+    working_dir: /app/src
+    restart: unless-stopped

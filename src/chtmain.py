@@ -44,9 +44,6 @@ class SimulationResult:
             d["tracks"] = {f"{k[0]}:{k[1]}": v for k, v in self.tracks.items()}
         return d
 
-# -----------------------------
-# Вычисление раскладки
-# -----------------------------
 def compute_layout(cfg: SimulationConfig, data: dict) -> dict:
     tp = TrimParser(data)
     mats = tp.readMaterials()
@@ -73,9 +70,6 @@ def compute_layout(cfg: SimulationConfig, data: dict) -> dict:
         screens_end_z_mm=screens_end_z_mm,
     )
 
-# -----------------------------
-# Вспомогательные классы
-# -----------------------------
 class TrackCollector:
     def __init__(self, enabled: bool = False) -> None:
         self.enabled = enabled
@@ -163,7 +157,7 @@ class ScreenGeometry(g4.G4VUserDetectorConstruction):
             sc_log.SetSensitiveDetector(sd)
 
 # -----------------------------
-# Сенсоры и действия
+# Сенсоры
 # -----------------------------
 class ScreenSensitiveDetector(g4.G4VSensitiveDetector):
     def __init__(self, name, screen_info):

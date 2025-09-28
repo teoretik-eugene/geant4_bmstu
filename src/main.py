@@ -1,499 +1,540 @@
-from geant4_pybind import *
-from geant4_pybind import G4Event, G4Step, G4TouchableHistory, G4VPhysicalVolume
+"""
+Geant4 (geant4_pybind) simulation module with optional PyVista visualization.
+"""
+from __future__ import annotations
+from dataclasses import dataclass, asdict
+from typing import Dict, List, Tuple, Optional, Any
+import json
+import geant4_pybind as g4
 from DataServer import DataServer
 from TrimParser import TrimParser
-import sys
-import pyvista
-import numpy as np
+import atexit
+import gc
 
+_geant4_initialized = False
 
-class ScreenGeometry(G4VUserDetectorConstruction):
-    # Убрали параметр taskId
-    def __init__(self, data, screen_info: dict) -> None:
+# -----------------------------
+# Конфиги и результаты
+# -----------------------------
+@dataclass
+class SimulationConfig:
+    task_id: Optional[int] = None
+    input_data: Optional[dict] = None
+    particle: str = "He3"
+    energy_mev: float = 40.0
+    events: int = 10
+    world_xy_mm: float = 500.0
+    world_z_mm: float = 500.0
+    screen_xy_mm: float = 250.0
+    first_screen_z_mm: float = 15.0
+    collect_tracks: bool = False
+    visualize: bool = False
+
+@dataclass
+class SimulationResult:
+    screen_info: Dict[str, Any]
+    total_particles: int
+    total_out_primary_particles: int
+    total_out_secondary_particles: int
+    tracks: Optional[Dict[Tuple[int, int], List[Tuple[float, float, float]]]] = None
+
+    def to_dict(self) -> dict:
+        d = asdict(self)
+        if self.tracks is not None:
+            d["tracks"] = {f"{k[0]}:{k[1]}": v for k, v in self.tracks.items()}
+        return d
+
+def compute_layout(cfg: SimulationConfig, data: dict) -> dict:
+    tp = TrimParser(data)
+    mats = tp.readMaterials()
+    thicknesses = [float(m.get("Width")) / 1000.0 for m in mats]  # мкм → мм
+    total_thickness_mm = sum(thicknesses)
+    world_z_mm_needed = cfg.first_screen_z_mm + total_thickness_mm + 50.0
+    world_z_mm_local = max(cfg.world_z_mm, world_z_mm_needed)
+    half_world_z_mm = 0.5 * world_z_mm_local
+    first_screen_front_z_mm = -half_world_z_mm + cfg.first_screen_z_mm
+    centers = []
+    z_cursor = first_screen_front_z_mm
+    for th in thicknesses:
+        centers.append(z_cursor + 0.5 * th)
+        z_cursor += th
+    screens_end_z_mm = first_screen_front_z_mm + total_thickness_mm
+
+    return dict(
+        thicknesses_mm=thicknesses,
+        total_thickness_mm=total_thickness_mm,
+        world_z_mm_local=world_z_mm_local,
+        half_world_z_mm=half_world_z_mm,
+        first_screen_front_z_mm=first_screen_front_z_mm,
+        first_screen_centers_mm=centers,
+        screens_end_z_mm=screens_end_z_mm,
+    )
+
+class TrackCollector:
+    def __init__(self, enabled: bool = False) -> None:
+        self.enabled = enabled
+        self._data: Dict[Tuple[int, int], List[Tuple[float, float, float]]] = {}
+    def add(self, event_id: int, track_id: int, pos: g4.G4ThreeVector) -> None:
+        if not self.enabled:
+            return
+        self._data.setdefault((event_id, track_id), []).append((pos.x, pos.y, pos.z))
+    @property
+    def data(self):
+        return self._data
+
+# -----------------------------
+# Геометрия
+# -----------------------------
+class ScreenGeometry(g4.G4VUserDetectorConstruction):
+    def __init__(self, data: dict, screen_info: Dict[str, Any], cfg: SimulationConfig) -> None:
         super().__init__()
-        # self.ds = DataServer()
-        # self.tp = TrimParser(data=self.ds.get_current_task_to_json(task_id))
         self.tp = TrimParser(data)
         self.screen_info = screen_info
+        self.cfg = cfg
+        self.logic_world = None
+        self.screen_logicals = []
+        self.screens_end_z_mm = cfg.first_screen_z_mm
+        self._precomputed_layout: Optional[dict] = None
 
-        # Сделаю тут вывод некоторых данных  в файл
-        with open('out.txt', 'w+') as f:
-            f.write('\t\tOutput data: \n')
-
-    # TODO реализовать логику создания экранов/слоев из запроса
-    def Construct(self) -> G4VPhysicalVolume:
-
-        nist = G4NistManager.Instance()
-        checkOverlaps = True
-
-        # World
-
-        world_sizeXY = 50 * cm
-        world_sizeZ = 50 * cm
-        world_mat = nist.FindOrBuildMaterial('G4_AIR')
-
-        solid_world = G4Box("World", 0.5 * world_sizeXY, 0.5 * world_sizeXY, 0.5 * world_sizeZ)
-        logic_world = G4LogicalVolume(solid_world, world_mat, "World")
-
-        phys_world = G4PVPlacement(
-            None,
-            G4ThreeVector(),
-            logic_world,
-            "World",
-            None,
-            False,
-            0,
-            checkOverlaps
-        )
-
-        '''
-            Возникает ошибка: Segmentation fault (core dumped)
-        '''
-        # Логика формирования экранов, по хорошему, конечно, стоит вынести это в отдельный метод
+    def Construct(self):
+        nist = g4.G4NistManager.Instance()
+        check_overlaps = True
         materials = self.tp.readMaterials()
-        # Чисто для проверки
-        self.screen_info['Materials'] = []
-        material_list = []
-        indx = 0
-        for mat in materials:
-            mat_name = mat.get('Name')
-            mat_width = (float(mat.get('Width')) / 1000) * mm
+        self.screen_info["Materials"] = []
+        material_defs = []
+        layout = self._precomputed_layout or compute_layout(self.cfg, {"Materials": materials})
+        thicknesses_mm = layout["thicknesses_mm"]
+        total_thickness_mm = layout["total_thickness_mm"]
+        world_z_mm_local = layout["world_z_mm_local"]
+        half_world_z_mm = layout["half_world_z_mm"]
+        first_screen_front_z_mm = layout["first_screen_front_z_mm"]
 
-            self.screen_info.get('Materials').append({'Name': mat_name})
-            self.screen_info.get('Materials')[indx]['Primary_stuck_count'] = 0
-            self.screen_info.get('Materials')[indx]['Secondary_stuck_count'] = 0
-            indx += 1
+        for mat, thickness_mm in zip(materials, thicknesses_mm):
+            mat_name = str(mat.get("Name"))
+            self.screen_info["Materials"].append({
+                "Name": mat_name,
+                "Primary_stuck_count": 0,
+                "Secondary_stuck_count": 0,
+                "Thickness_mm": thickness_mm,
+            })
+            
+            elems = mat.get("Elements", [])
+            el_defs = []
+            for elem in elems:
+                symbol = str(elem.get("Symbol"))
+                fraction = float(elem.get("Percentage"))
+                density = float(elem.get("Density"))
+                el_defs.append((nist.FindOrBuildElement(symbol), fraction, density))
+            total_fraction = sum(fr for _, fr, _ in el_defs) or 1.0
+            avg_density = sum((fr / total_fraction) * rho for _, fr, rho in el_defs)
+            g4mat = g4.G4Material(mat_name, avg_density * g4.g / g4.cm3, len(el_defs))
+            for element, fr, _ in el_defs:
+                g4mat.AddElement(element, frac=(fr / total_fraction))
+            material_defs.append((g4mat, thickness_mm * g4.mm, mat_name))
+        
+        world_xy_mm_local = max(self.cfg.world_xy_mm, self.cfg.screen_xy_mm + 50.0)
+        solid_world = g4.G4Box("World", 0.5 * world_xy_mm_local * g4.mm, 0.5 * world_xy_mm_local * g4.mm, 0.5 * world_z_mm_local * g4.mm)
+        self.logic_world = g4.G4LogicalVolume(solid_world, nist.FindOrBuildMaterial("G4_AIR"), "World")
+        phys_world = g4.G4PVPlacement(None, g4.G4ThreeVector(), self.logic_world, "World", None, False, 0, check_overlaps)
+        z_cursor = first_screen_front_z_mm * g4.mm
+        screen_xy = self.cfg.screen_xy_mm * g4.mm
 
-            elements = mat.get('Elements')
-            element_list = []
-
-            for elem in elements:
-                elem_name = elem.get('Name')
-                elem_symbol = elem.get('Symbol')
-                elem_atomic_number = float(elem.get('Atomic_number'))
-                elem_density = float(elem.get('Density'))
-                elem_aem = float(elem.get('Standard_atomic_weight'))
-                elem_perc = float(elem.get('Percentage'))
-                # мб попробовать другое название вбивать?
-                # element = nist.FindOrBuildElement(elem_atomic_number, False)
-                element = nist.FindOrBuildElement(elem_symbol)
-                # print(f'elem: {element}')
-                element_list.append([element, elem_perc, elem_density])
-
-            # Высчитывание процента
-            total_perc = 0
-            # Общий относительный процент
-            for _ in element_list:
-                total_perc += _[1]
-
-            avg_density = 0
-            for _ in element_list:
-                # Описание действия: elem_perc = elem_perc / total
-                _[1] = _[1] / total_perc
-                # Описание действия: avg_density = elem_perc1 * elem_density1 + elem_perc2 * elem_density2
-                avg_density += _[1] * _[2]
-
-            # Создаем материал
-            components = len(element_list)
-            material = G4Material(mat_name, avg_density * g / cm3, components)
-            for _ in element_list:
-                material.AddElement(_[0], frac=_[1])
-            print('material name: ', material.GetName())
-            material_list.append([material, mat_width, mat_name])
-
-        screen_detXY = 250 * mm
-        screen_coord = 15 * mm
-        global s_info
-        s_info = []
-        # Создаем экраны и помещаем в лист логические объемы, чтобы потом их использовать в SD
-        self.screen_list = []
-        num = 0
-        for mat in material_list:
-            screen_name = f'Screen-- {num}'
-            screen_width = mat[1]
-            screen_material = mat[0]
-            num += 1
-            solid_screen = G4Box(screen_name, 0.5 * screen_detXY, 0.5 * screen_detXY, 0.5 * screen_width)
-            logic_screen = G4LogicalVolume(solid_screen, screen_material, screen_name)
-            phys_screen = G4PVPlacement(
-                None,
-                G4ThreeVector(0, 0, screen_coord + 0.5 * screen_width),
-                logic_screen,
-                screen_name,
-                logic_world,
-                0,
-                checkOverlaps
-            )
-            # s_info.append([screen_detXY, screen_width, screen_coord])
-            s_info.append([[-0.5*screen_detXY, -0.5 * screen_detXY, screen_coord],
-                           [0.5*screen_detXY, -0.5 * screen_detXY, screen_coord],
-                           [0.5*screen_detXY, 0.5 * screen_detXY, screen_coord],
-                           [-0.5*screen_detXY, 0.5 * screen_detXY, screen_coord],
-                           [-0.5*screen_detXY, -0.5 * screen_detXY, screen_coord]])
-            screen_coord += screen_width
-            self.screen_list.append(logic_screen)
-            # Создаем лист длиной как лист экранов
-            # В этом листе будет храниться количество застрявших частиц в слое экрана
-            self.particles_count = [0] * len(self.screen_list)
-
+        for idx, (g4mat, thickness, _) in enumerate(material_defs):
+            center_z = z_cursor + 0.5 * thickness
+            solid = g4.G4Box(f"Screen_{idx}", 0.5 * screen_xy, 0.5 * screen_xy, 0.5 * thickness)
+            logical = g4.G4LogicalVolume(solid, g4mat, f"Screen_{idx}")
+            g4.G4PVPlacement(None, g4.G4ThreeVector(0, 0, center_z), logical, f"Screen_{idx}", self.logic_world, False, 0, check_overlaps)
+            self.screen_logicals.append(logical)
+            z_cursor += thickness
+        self.screens_end_z_mm = first_screen_front_z_mm + total_thickness_mm
         return phys_world
 
-    def ConstructSDandField(self) -> None:
-        fSDM = G4SDManager.GetSDMpointer()
+    def ConstructSDandField(self):
+        sdm = g4.G4SDManager.GetSDMpointer()
+        for idx, sc_log in enumerate(self.screen_logicals):
+            sd = ScreenSensitiveDetector(f"ScreenDetector_{idx}", self.screen_info)
+            sdm.AddNewDetector(sd)
+            sc_log.SetSensitiveDetector(sd)
 
-        screen_ls = self.screen_list
-
-        num = 0
-        for sc in screen_ls:
-            screen_detector_name = f'Screen_Detector - {num}'
-            screen_detector = ScreenSensitiveDetector(screen_detector_name, self.screen_info)
-            fSDM.AddNewDetector(screen_detector)
-            sc.SetSensitiveDetector(screen_detector)
-
-
-class ScreenEventAction(G4UserEventAction):
-
-    def __init__(self) -> None:
-        super().__init__()
-        self.eventId = None
-
-    def BeginOfEventAction(self, anEvent: G4Event) -> None:
-        self.eventId = anEvent.GetEventID()
-
-    def EndOfEventAction(self, anEvent: G4Event) -> None:
-        self.eventId = None
-
-
-class ScreenSteppingAction(G4UserSteppingAction):
-    def __init__(self, primaryParticlesOutId: list, secondaryParticlesOutId: list, screen_end,
-                 eventAction: ScreenEventAction) -> None:
-        super().__init__()
-        self.screen_end_coord = screen_end
-        self.eventAction = eventAction
-
-    global df
-    df = {}
-    def UserSteppingAction(self, step: G4Step) -> None:
-        track = step.GetTrack()
-        pos_x = step.GetPostStepPoint().GetPosition().x
-        pos_y = step.GetPostStepPoint().GetPosition().y
-        pos_z = step.GetPostStepPoint().GetPosition().z
-
-        eventTrack = (self.eventAction.eventId, track.GetTrackID())
-
-        # Проверка вылетевших первичных частиц
-        if pos_x > self.screen_end_coord and not (eventTrack in primaryParticlesOutId) \
-                and track.GetTrackID() == 1:
-            primaryParticlesOutId.append(eventTrack)
-
-        # Проверка вылетевших вторичных частиц
-        if pos_x > self.screen_end_coord and not (eventTrack in secondaryParticlesOutId) \
-                and track.GetTrackID() > 1:
-            secondaryParticlesOutId.append(eventTrack)
-
-        # Создание json для визуализации
-        if eventTrack not in df:
-            df[eventTrack] = []
-        df[eventTrack].append([pos_x, pos_y, pos_z])
-        # df.append({
-        #     "event_id": eventTrack[0],
-        #     "track_id": eventTrack[1],
-        #     "X": pos_x,
-        #     "Y": pos_y,
-        #     "Z": pos_z,
-        # })
-
-
-class ScreenSensitiveDetector(G4VSensitiveDetector):
-
-    def __init__(self, name: str, screen_info: dict):
+# -----------------------------
+# Сенсоры
+# -----------------------------
+class ScreenSensitiveDetector(g4.G4VSensitiveDetector):
+    def __init__(self, name, screen_info):
         super().__init__(name)
         self.screen_info = screen_info
-
-    def ProcessHits(self, aStep: G4Step, hist: G4TouchableHistory) -> bool:
-        edep = aStep.GetTotalEnergyDeposit()
-
+    def ProcessHits(self, aStep, _hist):
         track = aStep.GetTrack()
-
-        kinetic = aStep.GetTrack().GetKineticEnergy()
-
-        # Если кинетическая энергия у первичной частицы 0, то записываем в файл (просто тест)
-        # if(kinetic == 0 and track.GetTrackID() == 1 and track.GetDefinition().GetParticleName() == 'He3'):
-        if (kinetic == 0 and track.GetTrackID() == 1):
-            screen_num = int(track.GetVolume().GetName()[9::])
-            self.screen_info.get('Materials')[screen_num]['Primary_stuck_count'] += 1
-            with open('out.txt', 'a') as f:
-                f.write(
-                    f'{track.GetTrackID()}:\t{str(track.GetVolume().GetName())}\t{track.GetDefinition().GetParticleName()}\n')
-
-        if (kinetic == 0 and track.GetTrackID() > 1):
-            screen_num = int(track.GetVolume().GetName()[9::])
-            self.screen_info.get('Materials')[screen_num]['Secondary_stuck_count'] += 1
-            with open('out.txt', 'a') as f:
-                f.write(
-                    f'{track.GetTrackID()}:\t{str(track.GetVolume().GetName())}\t{track.GetDefinition().GetParticleName()}\n')
-
-        newHit = TrackerHit(aStep.GetTrack().GetTrackID,
-                            edep,
-                            aStep.GetPostStepPoint().GetPosition(),
-                            aStep.GetPostStepPoint().GetKineticEnergy())
+        if track.GetKineticEnergy() == 0:
+            vol_name = track.GetVolume().GetName()
+            try:
+                idx = int(str(vol_name).split("_")[-1])
+            except Exception:
+                return True
+            if track.GetTrackID() == 1:
+                self.screen_info["Materials"][idx]["Primary_stuck_count"] += 1
+            else:
+                self.screen_info["Materials"][idx]["Secondary_stuck_count"] += 1
         return True
 
-
-class TrackerHit(G4VHit):
-
-    def __init__(self, trackID, edep, pos, kinetic) -> None:
+class ScreenEventAction(g4.G4UserEventAction):
+    def __init__(self):
         super().__init__()
-        self.fTrackID = trackID
-        self.fEdep = edep
-        self.fPos = pos
-        self.fKinetic = kinetic
+        self.event_id = None
+    def BeginOfEventAction(self, anEvent):
+        self.event_id = anEvent.GetEventID()
+    def EndOfEventAction(self, anEvent):
+        self.event_id = None
 
-    def Draw(self) -> None:
-        vVisManager = G4VVisManager.GetConcreteInstance()
-        if vVisManager != None:
-            circle = G4Circle(self.fPos)
-            circle.SetScreenSize(4)
-            circle.SetFillStyle(G4Circle.filled)
-            colour = G4Colour(1, 0, 0)
-            attribs = G4VisAttributes()
-            attribs.SetColor(colour)
-            circle.SetVisAttributes(attribs)
-            vVisManager.Draw(circle)
-
-    def Print(self) -> None:
-        print(f"TrackID: {self.fTrackID}  =====  Edep: {self.fEdep}")
-
-
-class PrimaryGeneration(G4VUserPrimaryGeneratorAction):
-    def __init__(self) -> None:
+class ScreenSteppingAction(g4.G4UserSteppingAction):
+    def __init__(self, primary_out, secondary_out, screens_end_z_mm, event_action, tracks):
         super().__init__()
+        self.primary_out = primary_out
+        self.secondary_out = secondary_out
+        self.screens_end_z_mm = screens_end_z_mm
+        self.event_action = event_action
+        self.tracks = tracks
+    def UserSteppingAction(self, step):
+        post = step.GetPostStepPoint()
+        pos = post.GetPosition()
+        track = step.GetTrack()
+        if self.event_action.event_id is not None:
+            self.tracks.add(self.event_action.event_id, track.GetTrackID(), pos)
+        if (pos.z / g4.mm) > self.screens_end_z_mm:
+            key = (self.event_action.event_id or -1, track.GetTrackID())
+            if track.GetTrackID() == 1:
+                if key not in self.primary_out:
+                    self.primary_out.append(key)
+            else:
+                if key not in self.secondary_out:
+                    self.secondary_out.append(key)
 
-        # Количество частиц в одном событии
-        n_particles = 1
-        self.fParticleGun = G4ParticleGun(n_particles)
-
-        particle_table = G4ParticleTable.GetParticleTable()
-        # particle = particle_table.FindAntiParticle("proton")
-        global main_part
-        particle = particle_table.FindParticle(main_part:='He3')
-
+class PrimaryGeneration(g4.G4VUserPrimaryGeneratorAction):
+    def __init__(self, particle_name, energy_mev, source_z_mm):
+        super().__init__()
+        self.fParticleGun = g4.G4ParticleGun(1)
+        particle_table = g4.G4ParticleTable.GetParticleTable()
+        particle = particle_table.FindParticle(particle_name)
+        if particle is None:
+            raise ValueError(f"Unknown particle: {particle_name}")
         self.fParticleGun.SetParticleDefinition(particle)
-        self.fParticleGun.SetParticleMomentumDirection(G4ThreeVector(0., 0., 1.0))
-        self.fParticleGun.SetParticleEnergy(40 * MeV)
-
-    def GeneratePrimaries(self, anEvent: G4Event) -> None:
-
-        worldLV = G4LogicalVolumeStore.GetInstance().GetVolume("World")
-        world_box = None
-        world_half_len = None
-
-        if worldLV != None:
-            world_box = worldLV.GetSolid()
-
-        if world_box != None:
-            world_half_len = world_box.GetZHalfLength()  # эту команду vs code не видит
-
-        # Следует выбрать мб норм расстояние?
-        self.fParticleGun.SetParticlePosition(G4ThreeVector(0, 0, -50 * cm))
+        self.fParticleGun.SetParticleMomentumDirection(g4.G4ThreeVector(0.0, 0.0, 1.0))
+        self.fParticleGun.SetParticleEnergy(energy_mev * g4.MeV)
+        self.source_z = source_z_mm * g4.mm
+    def GeneratePrimaries(self, anEvent):
+        self.fParticleGun.SetParticlePosition(g4.G4ThreeVector(0, 0, self.source_z))
         self.fParticleGun.GeneratePrimaryVertex(anEvent)
 
-
-class ActionInitialization(G4VUserActionInitialization):
-
-    def __init__(self, data: dict, primary_particles_out: list, secondary_particles_out: list) -> None:
+class ActionInitialization(g4.G4VUserActionInitialization):
+    def __init__(self, data, primary_out, secondary_out, particle, energy_mev, layout, tracks):
         super().__init__()
-        tp = TrimParser(data)
-        # Координата крайней поверхности экранов
-        self.screen_cord = (15 + tp.sumWidth()) * mm
-        self.primary_particles_out = primary_particles_out
-        self.secondary_particles_out = secondary_particles_out
+        self.data = data
+        self.primary_out = primary_out
+        self.secondary_out = secondary_out
+        self.particle = particle
+        self.energy_mev = energy_mev
+        self.layout = layout
+        self.tracks = tracks
+    def Build(self):
+        half_world_z_mm = self.layout["half_world_z_mm"]
+        first_front_mm = self.layout["first_screen_front_z_mm"]
+        source_z_mm = max(first_front_mm - 10.0, -half_world_z_mm + 1.0)
+        self.SetUserAction(PrimaryGeneration(self.particle, self.energy_mev, source_z_mm))
+        event_action = ScreenEventAction()
+        self.SetUserAction(event_action)
+        self.SetUserAction(ScreenSteppingAction(
+            self.primary_out,
+            self.secondary_out,
+            self.layout["screens_end_z_mm"],
+            event_action,
+            self.tracks,
+        ))
 
-    def Build(self) -> None:
-        # self.SetUserAction(SteppingAction())
-        self.SetUserAction(PrimaryGeneration())
-        eventAction = ScreenEventAction()
-        self.SetUserAction(eventAction)
-        self.SetUserAction(
-            ScreenSteppingAction(
-                self.primary_particles_out, 
-                self.secondary_particles_out, 
-                self.screen_cord, 
-                eventAction
-            )
-        )
-
+# -----------------------------
+# Запуск симуляции
+# -----------------------------
 class SimulationRunner:
-    def __init__(self):
-        self.screen_info = {}
-        self.primaryParticlesOutId = []
-        self.secondaryParticlesOutId = []
-        self.df = {}
-        self.s_info = []
-
-    def run_simulation(self, task_id, particle_type, energy, events_count):
+    def _load_input(self, cfg):
+        if cfg.input_data is not None:
+            return cfg.input_data
+        if cfg.task_id is not None:
+            return DataServer().get_current_task_to_json(cfg.task_id)
+        raise ValueError("Either task_id or input_data must be provided")
+    
+    def run(self, cfg):
+        global _geant4_initialized
+        
         try:
-            # Инициализация данных
-            ds = DataServer()
-            data = ds.get_current_task_to_json(task_id)
-            self.screen_info = {}
+            data = self._load_input(cfg)
+            layout = compute_layout(cfg, data)
+            screen_info = {}
+            primary_out = []
+            secondary_out = []
+            tracks = TrackCollector(enabled=cfg.collect_tracks)
             
-            # Настройка симуляции
-            # runManager = G4RunManagerFactory.CreateRunManager(G4RunManagerType.Serial)
-            runManager: G4RunManager = G4RunManagerFactory.CreateRunManager(G4RunManagerType.Serial)
-
-            runManager.SetUserInitialization(ScreenGeometry(data=data, screen_info=self.screen_info))
-            print('init physics')
-            physics = FTFP_BERT()
-            physics.SetVerboseLevel(1)
-            runManager.SetUserInitialization(physics)
-            print('init user initialization')
-            runManager.SetUserInitialization(
-                ActionInitialization(
-                    data=data,
-                    primary_particles_out=self.primaryParticlesOutId,
-                    secondary_particles_out=self.secondaryParticlesOutId
-                )
+            run_manager = g4.G4RunManagerFactory.CreateRunManager(g4.G4RunManagerType.Serial)
+            _geant4_initialized = True
+            
+            geom = ScreenGeometry(data=data, screen_info=screen_info, cfg=cfg)
+            geom._precomputed_layout = layout
+            run_manager.SetUserInitialization(geom)
+            run_manager.SetUserInitialization(g4.FTFP_BERT())
+            run_manager.SetUserInitialization(ActionInitialization(
+                data=data,
+                primary_out=primary_out,
+                secondary_out=secondary_out,
+                particle=cfg.particle,
+                energy_mev=cfg.energy_mev,
+                layout=layout,
+                tracks=tracks,
+            ))
+            
+            run_manager.Initialize()
+            run_manager.BeamOn(cfg.events)
+            
+            result = SimulationResult(
+                screen_info=screen_info,
+                total_particles=cfg.events,
+                total_out_primary_particles=len(primary_out),
+                total_out_secondary_particles=len(secondary_out),
+                tracks=tracks.data if cfg.collect_tracks else None,
             )
-            print('init run')
-            runManager.Initialize()
-            runManager.BeamOn(events_count)
-            print('end of modeling')
-            # Формирование результатов
-            result = {
-                'Screen': self.screen_info,
-                'Total_particles': events_count,
-                'Total_out_primary_particles': len(self.primaryParticlesOutId),
-                'Total_out_secondary_particles': len(self.secondaryParticlesOutId)
-            }
             
             return result
             
-        except Exception as e:
-            raise RuntimeError(f"Simulation failed: {str(e)}")
+        finally:
+            # Всегда выполняем очистку
+            try:
+                if 'run_manager' in locals():
+                    del run_manager
+                _cleanup_geant4()
+                gc.collect()
+            except:
+                pass
+        
+# Глобальная переменная для отслеживания состояния Geant4
+_geant4_initialized = False
 
-def run_simulation_task_by_id(task_id: int, particle_type: str, energy: float, events_count: int) :
-    data_server = DataServer()
-    data = data_server.get_current_task_to_json(task_id)
-    screen_info = {}
-    primaryParticlesOutId = []
-    secondaryParticlesOutId = []
-    event_num = events_count # количество генерируемых событий
-    total_particles = event_num  # общий подсчет частиц
-    
-    runManager: G4RunManager = G4RunManagerFactory.CreateRunManager(G4RunManagerType.Serial)
+def _cleanup_geant4():
+    """Функция для очистки ресурсов Geant4 при выходе"""
+    global _geant4_initialized
+    if _geant4_initialized:
+        try:
+            # Принудительная сборка мусора
+            gc.collect()
+            _geant4_initialized = False
+        except:
+            pass
 
-    runManager.SetUserInitialization(ScreenGeometry(data=data, screen_info=screen_info))
+atexit.register(_cleanup_geant4)
 
-    physics = FTFP_BERT()
-    physics.SetVerboseLevel(1)
-    runManager.SetUserInitialization(physics)
-
-    runManager.SetUserInitialization(
-        ActionInitialization(
-            data=data,
-            primary_particles_out=primaryParticlesOutId,
-            secondary_particles_out=secondaryParticlesOutId
+def save_visualization_to_html(cfg, res, layout, task_id):
+    """Сохраняет визуализацию в HTML файл"""
+    try:
+        import pyvista as pv
+        import os
+        
+        # Создаем директорию для визуализаций если нет
+        viz_dir = "visualizations"
+        os.makedirs(viz_dir, exist_ok=True)
+        
+        # Создаем plotter в off-screen режиме
+        plotter = pv.Plotter(off_screen=True)
+        plotter.set_background("white")
+        
+        # Настройки камеры
+        plotter.camera_position = 'yz'
+        plotter.camera.azimuth = 30
+        plotter.camera.elevation = 20
+        
+        # Рисуем экраны с разными цветами
+        materials = res.screen_info["Materials"]
+        z_cursor = float(layout["first_screen_front_z_mm"])
+        
+        for i, mat in enumerate(materials):
+            th = float(mat["Thickness_mm"])
+            center_z = z_cursor + 0.5 * th
+            
+            # Разные цвета для разных материалов
+            colors = ["lightblue", "lightgreen", "lightyellow", "lightcoral", "lavender"]
+            color = colors[i % len(colors)]
+            
+            cube = pv.Cube(
+                center=(0, 0, center_z),
+                x_length=cfg.screen_xy_mm * 0.8,
+                y_length=cfg.screen_xy_mm * 0.8,
+                z_length=th
             )
+            
+            plotter.add_mesh(
+                cube, 
+                color=color, 
+                opacity=0.6, 
+                name=f"{mat['Name']}",
+                show_edges=True,
+                edge_color="black",
+                line_width=2
+            )
+            
+            # Добавляем аннотацию с названием материала
+            plotter.add_point_labels(
+                points=[(0, cfg.screen_xy_mm * 0.4, center_z)],
+                labels=[mat["Name"]],
+                font_size=14,
+                text_color="black",
+                shadow=True,
+                shape_color="white",
+                shape_opacity=0.8
+            )
+            
+            z_cursor += th
+
+        # Рисуем источник частиц
+        source_z = max(layout["first_screen_front_z_mm"] - 10.0, -layout["half_world_z_mm"] + 1.0)
+        source_sphere = pv.Sphere(center=(0, 0, source_z), radius=2.0)
+        plotter.add_mesh(source_sphere, color="red", name="source")
+
+        # Добавляем подпись источника
+        plotter.add_point_labels(
+            points=[(0, cfg.screen_xy_mm * 0.4, source_z)],
+            labels=["Источник частиц"],
+            font_size=12,
+            text_color="darkred",
+            shadow=True
         )
 
-    runManager.Initialize()
+        # Рисуем треки
+        colors = ["blue", "green", "darkorange", "purple", "cyan", "magenta", "brown", "pink"]
+        
+        # Разделяем первичные и вторичные треки
+        primary_tracks = []
+        secondary_tracks = []
+        
+        for track_id, pts in res.tracks.items():
+            if track_id[1] == 1:  # track_id format: (event_id, track_id)
+                primary_tracks.append(pts)
+            else:
+                secondary_tracks.append(pts)
+        
+        # Рисуем первичные треки (толще)
+        for i, pts in enumerate(primary_tracks):
+            if len(pts) >= 2:
+                color = colors[i % len(colors)]
+                line = pv.lines_from_points(pts)
+                plotter.add_mesh(
+                    line, 
+                    color=color, 
+                    line_width=5, 
+                    name=f"primary_track_{i}",
+                    render_lines_as_tubes=True
+                )
+        
+        # Рисуем вторичные треки (тоньше)
+        for i, pts in enumerate(secondary_tracks):
+            if len(pts) >= 2:
+                color = colors[(i + len(primary_tracks)) % len(colors)]
+                line = pv.lines_from_points(pts)
+                plotter.add_mesh(
+                    line, 
+                    color=color, 
+                    line_width=2, 
+                    name=f"secondary_track_{i}",
+                    render_lines_as_tubes=True
+                )
 
-    # Количество запускаемых событий и общее количество первичных запускаемых части
-    runManager.BeamOn(event_num)
+        # Добавляем оси
+        plotter.add_axes(interactive=True)
+        
+        # Добавляем легенду
+        legend_entries = [("Источник", "red")]
+        if primary_tracks:
+            legend_entries.append(("Первичные частицы", "blue"))
+        if secondary_tracks:
+            legend_entries.append(("Вторичные частицы", "green"))
+            
+        plotter.add_legend(
+            labels=legend_entries,
+            bcolor="white",
+            face="r",
+            size=(0.2, 0.1),
+            position="upper right"
+        )
+        
+        # Добавляем заголовок
+        plotter.add_text(
+            f"Geant4 Симуляция - Задача {task_id}\n"
+            f"Частица: {cfg.particle}, Энергия: {cfg.energy_mev} МэВ, Событий: {cfg.events}",
+            position="upper_edge",
+            font_size=16,
+            color="black"
+        )
+        
+        # Сохраняем в HTML
+        html_filename = os.path.join(viz_dir, f"geant4_simulation_{task_id}.html")
+        plotter.export_html(html_filename)
+        
+        # Сохраняем скриншот
+        screenshot_filename = os.path.join(viz_dir, f"geant4_simulation_{task_id}.png")
+        plotter.screenshot(screenshot_filename, transparent_background=False)
+        
+        print(f"Визуализация сохранена:")
+        print(f"HTML файл: {html_filename}")
+        print(f"Скриншот: {screenshot_filename}")
+        
+        return html_filename
+        
+    except ImportError as e:
+        print(f"Ошибка импорта PyVista: {e}")
+        return None
+    except Exception as e:
+        print(f"Ошибка визуализации: {e}")
+        return None
 
-    result = {
-        'Screen': screen_info,
-        'Total_particles': total_particles,
-        'Total_out_primary_particles': len(primaryParticlesOutId),
-        'Total_out_secondary_particles': len(secondaryParticlesOutId)
-    }
+def run_simulation(cfg: SimulationConfig) -> SimulationResult:
+    runner = SimulationRunner()
+    return runner.run(cfg)
 
-    # pl = pyvista.Plotter()
-    # for key in df:
-    #     points = np.array(df[key])
-    #     actor = pl.add_lines(points, color='purple', width=3, connected=True)
-    # for i in s_info:
-    #     points = np.array(i)
-    #     actor = pl.add_lines(points, color='blue', width=2, connected=True)
-    # pl.camera_position = 'xy'
-    # pl.export_html(f'{task_id}_{event_num}_{main_part}.html')
-    # #pl.show()
-
-    # Сформировать ответ
+if __name__ == "__main__":
     ds = DataServer()
-    #print(ds.to_json(screen_particles))
-
-    return result
-
-
-if __name__ == '__main__':
-    # Создаем объект класса, который будет общаться с серваком
-    ds = DataServer()
-    # tp = TrimParser(data=ds.get_current_task_to_json(9))
-    task_id = 9  # примеры тасков: 9, 103, 170
+    task_id = 103
     data = ds.get_current_task_to_json(task_id)
-    screen_info = {}  # словарь для записи информации о каждом экране
-
-    primaryParticlesOutId = []
-    secondaryParticlesOutId = []
-
-    event_num = 10 # количество генерируемых событий
-    total_particles = event_num  # общий подсчет частиц
-
-    runManager: G4RunManager = G4RunManagerFactory.CreateRunManager(G4RunManagerType.Serial)
-
-    runManager.SetUserInitialization(ScreenGeometry(data=data, screen_info=screen_info))
-
-    physics = FTFP_BERT()
-    physics.SetVerboseLevel(1)
-    runManager.SetUserInitialization(physics)
-
-    runManager.SetUserInitialization(ActionInitialization(data=data, 
-                                                          primary_particles_out=primaryParticlesOutId, 
-                                                          secondary_particles_out=secondaryParticlesOutId))
-
-    runManager.Initialize()
-
-    # Количество запускаемых событий и общее количество первичных запускаемых части
-    runManager.BeamOn(event_num)
-
-    screen_particles = {}
-    screen_particles['Screen'] = screen_info
-    screen_particles['Total_particles'] = total_particles
-    # screen_particles['Total_out_particles'] = len(p)
-    screen_particles['Total_out_primary_particles'] = len(primaryParticlesOutId)
-    screen_particles['Total_out_secondary_particles'] = len(secondaryParticlesOutId)
-
-    # Визуализация
-    pl = pyvista.Plotter()
-    for key in df:
-        points = np.array(df[key])
-        actor = pl.add_lines(points, color='purple', width=3, connected=True)
-    for i in s_info:
-        points = np.array(i)
-        actor = pl.add_lines(points, color='blue', width=2, connected=True)
-    pl.camera_position = 'xy'
-    # pl.export_html(f'{task_id}_{event_num}_{main_part}.html')
-    pl.show()
-
-    # Сформировать ответ
-    ds = DataServer()
-    print(ds.to_json(screen_particles))
-    # print(particlesOutId)
-
-    '''
-    ui = G4UIExecutive(len(sys.argv), sys.argv)
-    visManager = G4VisExecutive()
-    visManager.Initialize()
-
-    UImanager = G4UImanager.GetUIpointer()
-    UImanager.ApplyCommand('/control/execute init_vis.mac')
-    UImanager.ApplyCommand('/gun/particle proton')
-    UImanager.ApplyCommand('/gun/energy 40 MeV')
-    UImanager.ApplyCommand('/tracking/verbose 1')
-    UImanager.ApplyCommand('/run/beamOn 50')
-    ui.SessionStart()
-    sys.exit()
-    '''
-    pass
+    
+    if not data:
+        print(f"❌ Ошибка: Не удалось получить данные для задачи {task_id}")
+        exit(1)
+        
+    cfg = SimulationConfig(
+        task_id=task_id,
+        input_data=data,
+        particle="He3",
+        energy_mev=60.0,
+        events=10,
+        collect_tracks=True,
+        visualize=True,
+    )
+    
+    print(f"🚀 Запуск симуляции для задачи {task_id}...")
+    runner = SimulationRunner()
+    res = runner.run(cfg)
+    
+    # Выводим результаты симуляции
+    print(json.dumps(res.to_dict(), indent=2, ensure_ascii=False))
+    
+    # Сохраняем визуализацию
+    if cfg.visualize and res.tracks:
+        layout = compute_layout(cfg, data)
+        html_file = save_visualization_to_html(cfg, res, layout, task_id)
+        
+        if html_file:
+            import os
+            abs_path = os.path.abspath(html_file)
+            print(f"📊 Визуализация сохранена в файл:")
+            print(f"   {abs_path}")
+            print(f"   Откройте его в браузере: file://{abs_path}")
+        else:
+            print("⚠️  Не удалось сохранить визуализацию")
+    else:
+        if not res.tracks:
+            print("ℹ️  Нет данных треков для визуализации")
+        else:
+            print("ℹ️  Визуализация отключена в настройках")

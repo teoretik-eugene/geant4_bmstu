@@ -1,4 +1,3 @@
-# Download base image ubuntu 20.04
 FROM ubuntu:22.04 as builder
 
 # Disable Prompt During Packages Installation
@@ -43,19 +42,24 @@ FROM builder
 
 COPY --from=builder /app/geant4/install /app/geant4/install
 COPY --from=builder /app/geant4/data /app/geant4/data
-COPY entry-point.sh /app/entry-point.sh
 
 # Копирование entry point скрипта
 COPY entry-point.sh /app/entry-point.sh
 RUN chmod +x /app/entry-point.sh
 
-# Копирование исходного кода из папки src
-COPY src/ /app/src/
-
+# Создаем структуру папок для монтирования
+RUN mkdir -p /app/src
 
 # install python requirements
 COPY requirements.txt  /app/requirements.txt 
 RUN python3 -m pip install -r /app/requirements.txt
+
+# Set environment variables
+ENV GEANT4_DIR=/app/geant4/install
+ENV GEANT4_DATA=/app/geant4/data
+ENV LD_LIBRARY_PATH=${GEANT4_DIR}/lib:${LD_LIBRARY_PATH}
+ENV PATH=${GEANT4_DIR}/bin:${PATH}
+ENV PYTHONPATH=/app/src
 
 # Установка рабочей директории
 WORKDIR /app/src
