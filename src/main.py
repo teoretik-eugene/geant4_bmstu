@@ -500,7 +500,7 @@ if __name__ == "__main__":
     data = ds.get_current_task_to_json(task_id)
     
     if not data:
-        print(f"❌ Ошибка: Не удалось получить данные для задачи {task_id}")
+        print(f"Ошибка: Не удалось получить данные для задачи {task_id}")
         exit(1)
         
     cfg = SimulationConfig(
@@ -513,7 +513,7 @@ if __name__ == "__main__":
         visualize=True,
     )
     
-    print(f"🚀 Запуск симуляции для задачи {task_id}...")
+    print(f"Запуск симуляции для задачи {task_id}...")
     runner = SimulationRunner()
     res = runner.run(cfg)
     
@@ -528,13 +528,13 @@ if __name__ == "__main__":
         if html_file:
             import os
             abs_path = os.path.abspath(html_file)
-            print(f"📊 Визуализация сохранена в файл:")
+            print(f"Визуализация сохранена в файл:")
             print(f"   {abs_path}")
             print(f"   Откройте его в браузере: file://{abs_path}")
         else:
-            print("⚠️  Не удалось сохранить визуализацию")
+            print("Не удалось сохранить визуализацию")
     else:
         if not res.tracks:
-            print("ℹ️  Нет данных треков для визуализации")
+            print("Нет данных треков для визуализации")
         else:
-            print("ℹ️  Визуализация отключена в настройках")
+            print("Визуализация отключена в настройках")

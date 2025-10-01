@@ -440,6 +440,12 @@ if __name__ == "__main__":
     print(json.dumps(res.to_dict(), indent=2, ensure_ascii=False))
     if cfg.visualize and res.tracks:
         import pyvista as pv
+        
+        try:
+            pv.start_xvfb()
+        except:
+            print("Предупреждение: Xvfb не запущен, используем offscreen режим")
+    
         layout = compute_layout(cfg, runner._load_input(cfg))
         plotter = pv.Plotter()
         

@@ -40,6 +40,18 @@ RUN mkdir -p /app/geant4/build && \
 
 FROM builder
 
+RUN apt-get update -qq --fix-missing \
+    && apt-get -y install python3 python3-pip python3-dev \
+    && apt-get -y install libx11-dev libxext-dev libxtst-dev libxrender-dev libgl1-mesa-dev \
+    && apt-get -y install libglu1-mesa-dev libglew-dev libxmu-dev libxi-dev \
+    && apt-get -y install libgl1-mesa-glx libosmesa6 mesa-utils \
+    && apt-get -y install xvfb libxcb-randr0-dev libxcb-xtest0-dev libxcb-xinerama0-dev \
+    && apt-get -y install libxcb-shape0-dev libxcb-xkb-dev libxcb-icccm4-dev libxcb-image0-dev \
+    && apt-get -y install libxcb-keysyms1-dev libxcb-render-util0-dev libxkbcommon-dev \
+    && apt-get -y install libxkbcommon-x11-dev libdbus-1-dev \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
+
 COPY --from=builder /app/geant4/install /app/geant4/install
 COPY --from=builder /app/geant4/data /app/geant4/data
 
@@ -52,7 +64,9 @@ RUN mkdir -p /app/src
 
 # install python requirements
 COPY requirements.txt  /app/requirements.txt 
-RUN python3 -m pip install -r /app/requirements.txt
+RUN python3 -m pip install "numpy<2" && \
+    python3 -m pip install -r /app/requirements.txt && \
+    python3 -m pip install nest_asyncio
 
 # Set environment variables
 ENV GEANT4_DIR=/app/geant4/install
