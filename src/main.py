@@ -10,6 +10,8 @@ from DataServer import DataServer
 from TrimParser import TrimParser
 import atexit
 import gc
+import os
+import datetime
 
 _geant4_initialized = False
 
@@ -74,13 +76,25 @@ class TrackCollector:
     def __init__(self, enabled: bool = False) -> None:
         self.enabled = enabled
         self._data: Dict[Tuple[int, int], List[Tuple[float, float, float]]] = {}
-    def add(self, event_id: int, track_id: int, pos: g4.G4ThreeVector) -> None:
+        self._particle_types: Dict[Tuple[int, int], str] = {}  # Новое: храним типы частиц
+    
+    def add(self, event_id: int, track_id: int, pos: g4.G4ThreeVector, particle_type: str = None) -> None:
         if not self.enabled:
             return
         self._data.setdefault((event_id, track_id), []).append((pos.x, pos.y, pos.z))
+        if particle_type and (event_id, track_id) not in self._particle_types:
+            self._particle_types[(event_id, track_id)] = particle_type
+    
+    def get_particle_type(self, event_id: int, track_id: int) -> str:
+        return self._particle_types.get((event_id, track_id), "unknown")
+    
     @property
     def data(self):
         return self._data
+    
+    @property
+    def particle_types(self):
+        return self._particle_types
 
 # -----------------------------
 # Геометрия
@@ -194,12 +208,35 @@ class ScreenSteppingAction(g4.G4UserSteppingAction):
         self.screens_end_z_mm = screens_end_z_mm
         self.event_action = event_action
         self.tracks = tracks
+    
     def UserSteppingAction(self, step):
         post = step.GetPostStepPoint()
         pos = post.GetPosition()
         track = step.GetTrack()
+        
+        # Получаем тип частицы из Geant4 - ИСПРАВЛЕННАЯ ВЕРСИЯ
+        particle_name = "unknown"
+        try:
+            # Попробуем разные способы получения определения частицы
+            particle_def = track.GetDefinition()  # Основной метод в pybind
+            if particle_def:
+                particle_name = particle_def.GetParticleName()
+        except AttributeError:
+            try:
+                # Альтернативный способ
+                particle_def = track.GetDynamicParticle().GetDefinition()
+                if particle_def:
+                    particle_name = particle_def.GetParticleName()
+            except:
+                # Если не получается, используем track_id для определения
+                if track.GetTrackID() == 1:
+                    particle_name = "primary"
+                else:
+                    particle_name = "secondary"
+        
         if self.event_action.event_id is not None:
-            self.tracks.add(self.event_action.event_id, track.GetTrackID(), pos)
+            self.tracks.add(self.event_action.event_id, track.GetTrackID(), pos, particle_name)
+        
         if (pos.z / g4.mm) > self.screens_end_z_mm:
             key = (self.event_action.event_id or -1, track.GetTrackID())
             if track.GetTrackID() == 1:
@@ -254,6 +291,9 @@ class ActionInitialization(g4.G4VUserActionInitialization):
 # Запуск симуляции
 # -----------------------------
 class SimulationRunner:
+    def __init__(self):
+        self._last_tracks = None
+    
     def _load_input(self, cfg):
         if cfg.input_data is not None:
             return cfg.input_data
@@ -271,6 +311,7 @@ class SimulationRunner:
             primary_out = []
             secondary_out = []
             tracks = TrackCollector(enabled=cfg.collect_tracks)
+            self._last_tracks = tracks  # Сохраняем для доступа к типам частиц
             
             run_manager = g4.G4RunManagerFactory.CreateRunManager(g4.G4RunManagerType.Serial)
             _geant4_initialized = True
@@ -328,167 +369,56 @@ def _cleanup_geant4():
 
 atexit.register(_cleanup_geant4)
 
-def save_visualization_to_html(cfg, res, layout, task_id):
-    """Сохраняет визуализацию в HTML файл"""
+def get_particle_color(particle_name):
+    """Возвращает цвет для конкретного типа частицы"""
+    color_map = {
+        # Первичные частицы
+        "He3": "blue",
+        "alpha": "darkblue",
+        "proton": "red",
+        "neutron": "gray",
+        "e-": "green",
+        "e+": "lightgreen",
+        "gamma": "yellow",
+        "mu-": "purple",
+        "mu+": "violet",
+        "pi+": "orange",
+        "pi-": "darkorange",
+        "kaon+": "brown",
+        "kaon-": "sandybrown",
+        "deuteron": "cyan",
+        "triton": "darkcyan",
+        
+        # По умолчанию
+        "primary": "blue",
+        "unknown": "black"
+    }
+    
+    # Нормализуем имя частицы
+    particle_name = str(particle_name).lower()
+    
+    # Ищем точное совпадение
+    for key, color in color_map.items():
+        if key.lower() == particle_name:
+            return color
+    
+    # Ищем частичное совпадение
+    for key, color in color_map.items():
+        if key.lower() in particle_name or particle_name in key.lower():
+            return color
+    
+    return color_map["unknown"]
+
+def export_to_html(plotter, filename="visualization.html"):
+    """Экспортирует сцену PyVista в HTML файл"""
     try:
-        import pyvista as pv
-        import os
-        
-        # Создаем директорию для визуализаций если нет
-        viz_dir = "visualizations"
-        os.makedirs(viz_dir, exist_ok=True)
-        
-        # Создаем plotter в off-screen режиме
-        plotter = pv.Plotter(off_screen=True)
-        plotter.set_background("white")
-        
-        # Настройки камеры
-        plotter.camera_position = 'yz'
-        plotter.camera.azimuth = 30
-        plotter.camera.elevation = 20
-        
-        # Рисуем экраны с разными цветами
-        materials = res.screen_info["Materials"]
-        z_cursor = float(layout["first_screen_front_z_mm"])
-        
-        for i, mat in enumerate(materials):
-            th = float(mat["Thickness_mm"])
-            center_z = z_cursor + 0.5 * th
-            
-            # Разные цвета для разных материалов
-            colors = ["lightblue", "lightgreen", "lightyellow", "lightcoral", "lavender"]
-            color = colors[i % len(colors)]
-            
-            cube = pv.Cube(
-                center=(0, 0, center_z),
-                x_length=cfg.screen_xy_mm * 0.8,
-                y_length=cfg.screen_xy_mm * 0.8,
-                z_length=th
-            )
-            
-            plotter.add_mesh(
-                cube, 
-                color=color, 
-                opacity=0.6, 
-                name=f"{mat['Name']}",
-                show_edges=True,
-                edge_color="black",
-                line_width=2
-            )
-            
-            # Добавляем аннотацию с названием материала
-            plotter.add_point_labels(
-                points=[(0, cfg.screen_xy_mm * 0.4, center_z)],
-                labels=[mat["Name"]],
-                font_size=14,
-                text_color="black",
-                shadow=True,
-                shape_color="white",
-                shape_opacity=0.8
-            )
-            
-            z_cursor += th
-
-        # Рисуем источник частиц
-        source_z = max(layout["first_screen_front_z_mm"] - 10.0, -layout["half_world_z_mm"] + 1.0)
-        source_sphere = pv.Sphere(center=(0, 0, source_z), radius=2.0)
-        plotter.add_mesh(source_sphere, color="red", name="source")
-
-        # Добавляем подпись источника
-        plotter.add_point_labels(
-            points=[(0, cfg.screen_xy_mm * 0.4, source_z)],
-            labels=["Источник частиц"],
-            font_size=12,
-            text_color="darkred",
-            shadow=True
-        )
-
-        # Рисуем треки
-        colors = ["blue", "green", "darkorange", "purple", "cyan", "magenta", "brown", "pink"]
-        
-        # Разделяем первичные и вторичные треки
-        primary_tracks = []
-        secondary_tracks = []
-        
-        for track_id, pts in res.tracks.items():
-            if track_id[1] == 1:  # track_id format: (event_id, track_id)
-                primary_tracks.append(pts)
-            else:
-                secondary_tracks.append(pts)
-        
-        # Рисуем первичные треки (толще)
-        for i, pts in enumerate(primary_tracks):
-            if len(pts) >= 2:
-                color = colors[i % len(colors)]
-                line = pv.lines_from_points(pts)
-                plotter.add_mesh(
-                    line, 
-                    color=color, 
-                    line_width=5, 
-                    name=f"primary_track_{i}",
-                    render_lines_as_tubes=True
-                )
-        
-        # Рисуем вторичные треки (тоньше)
-        for i, pts in enumerate(secondary_tracks):
-            if len(pts) >= 2:
-                color = colors[(i + len(primary_tracks)) % len(colors)]
-                line = pv.lines_from_points(pts)
-                plotter.add_mesh(
-                    line, 
-                    color=color, 
-                    line_width=2, 
-                    name=f"secondary_track_{i}",
-                    render_lines_as_tubes=True
-                )
-
-        # Добавляем оси
-        plotter.add_axes(interactive=True)
-        
-        # Добавляем легенду
-        legend_entries = [("Источник", "red")]
-        if primary_tracks:
-            legend_entries.append(("Первичные частицы", "blue"))
-        if secondary_tracks:
-            legend_entries.append(("Вторичные частицы", "green"))
-            
-        plotter.add_legend(
-            labels=legend_entries,
-            bcolor="white",
-            face="r",
-            size=(0.2, 0.1),
-            position="upper right"
-        )
-        
-        # Добавляем заголовок
-        plotter.add_text(
-            f"Geant4 Симуляция - Задача {task_id}\n"
-            f"Частица: {cfg.particle}, Энергия: {cfg.energy_mev} МэВ, Событий: {cfg.events}",
-            position="upper_edge",
-            font_size=16,
-            color="black"
-        )
-        
-        # Сохраняем в HTML
-        html_filename = os.path.join(viz_dir, f"geant4_simulation_{task_id}.html")
-        plotter.export_html(html_filename)
-        
-        # Сохраняем скриншот
-        screenshot_filename = os.path.join(viz_dir, f"geant4_simulation_{task_id}.png")
-        plotter.screenshot(screenshot_filename, transparent_background=False)
-        
-        print(f"Визуализация сохранена:")
-        print(f"HTML файл: {html_filename}")
-        print(f"Скриншот: {screenshot_filename}")
-        
-        return html_filename
-        
-    except ImportError as e:
-        print(f"Ошибка импорта PyVista: {e}")
-        return None
+        # Используем экспорт в HTML
+        plotter.export_html(filename)
+        print(f"Визуализация экспортирована в {filename}")
     except Exception as e:
-        print(f"Ошибка визуализации: {e}")
-        return None
+        print(f"Ошибка при экспорте в HTML: {e}")
+        # Альтернативный способ через сохранение и встраивание
+        plotter.show(screenshot=filename.replace('.html', '.png'))
 
 def run_simulation(cfg: SimulationConfig) -> SimulationResult:
     runner = SimulationRunner()
@@ -496,13 +426,8 @@ def run_simulation(cfg: SimulationConfig) -> SimulationResult:
 
 if __name__ == "__main__":
     ds = DataServer()
-    task_id = 103
+    task_id = 9
     data = ds.get_current_task_to_json(task_id)
-    
-    if not data:
-        print(f"Ошибка: Не удалось получить данные для задачи {task_id}")
-        exit(1)
-        
     cfg = SimulationConfig(
         task_id=task_id,
         input_data=data,
@@ -512,29 +437,98 @@ if __name__ == "__main__":
         collect_tracks=True,
         visualize=True,
     )
-    
-    print(f"Запуск симуляции для задачи {task_id}...")
     runner = SimulationRunner()
     res = runner.run(cfg)
-    
-    # Выводим результаты симуляции
     print(json.dumps(res.to_dict(), indent=2, ensure_ascii=False))
-    
-    # Сохраняем визуализацию
     if cfg.visualize and res.tracks:
-        layout = compute_layout(cfg, data)
-        html_file = save_visualization_to_html(cfg, res, layout, task_id)
+        import pyvista as pv
         
-        if html_file:
-            import os
-            abs_path = os.path.abspath(html_file)
-            print(f"Визуализация сохранена в файл:")
-            print(f"   {abs_path}")
-            print(f"   Откройте его в браузере: file://{abs_path}")
-        else:
-            print("Не удалось сохранить визуализацию")
-    else:
-        if not res.tracks:
-            print("Нет данных треков для визуализации")
-        else:
-            print("Визуализация отключена в настройках")
+        try:
+            pv.start_xvfb()
+        except:
+            print("Предупреждение: Xvfb не запущен, используем offscreen режим")
+    
+        layout = compute_layout(cfg, runner._load_input(cfg))
+        plotter = pv.Plotter()
+        
+        # draw screens
+        z_cursor = float(layout["first_screen_front_z_mm"])
+        for i, mat in enumerate(res.screen_info["Materials"]):
+            th = float(mat["Thickness_mm"])
+            center_z = z_cursor + 0.5 * th
+            cube = pv.Cube(
+                center=(0, 0, center_z),
+                x_length=cfg.screen_xy_mm * 0.6,
+                y_length=cfg.screen_xy_mm * 0.6,
+                z_length=th
+            )
+            plotter.add_mesh(cube, opacity=0.3, color='lightblue', name=f"Screen_{i}")
+            z_cursor += th
+
+        # draw source
+        source_z = max(layout["first_screen_front_z_mm"] - 10.0, -layout["half_world_z_mm"] + 1.0)
+        sphere = pv.Sphere(center=(0, 0, source_z), radius=0.2)
+        plotter.add_mesh(sphere, color='red', name="Source")
+
+        # draw tracks with particle-type coloring
+        particle_counts = {}
+        
+        # ИСПРАВЛЕНИЕ: используем tracks из результата симуляции
+        for track_key, pts in res.tracks.items():
+            if len(pts) >= 2:
+                event_id, track_id = track_key
+                
+                # Получаем тип частицы из TrackCollector
+                # Для этого нужно сохранить tracks объект и передать его
+                particle_name = "unknown"
+                if hasattr(runner, '_last_tracks'):
+                    particle_name = runner._last_tracks.get_particle_type(event_id, track_id)
+                else:
+                    # Альтернатива: определяем по track_id
+                    particle_name = "primary" if track_id == 1 else "secondary"
+                
+                # Считаем статистику по типам частиц
+                particle_counts[particle_name] = particle_counts.get(particle_name, 0) + 1
+                
+                # Получаем цвет для данного типа частицы
+                color = get_particle_color(particle_name)
+                
+                # Определяем толщину линии: первичные частицы толще
+                line_width = 2 if track_id == 1 else 1
+                
+                line = pv.lines_from_points(pts)
+                plotter.add_mesh(
+                    line, 
+                    color=color, 
+                    line_width=line_width,
+                    name=f"{particle_name}_{event_id}_{track_id}"
+                )
+        
+        # Добавляем информационную панель
+        legend_text = "Particle Types:\n"
+        for particle_name, count in particle_counts.items():
+            color = get_particle_color(particle_name)
+            legend_text += f"{particle_name}: {count}\n"
+        
+        plotter.add_text(legend_text, position='upper_right', font_size=8)
+        plotter.add_text(f"Geant4 Simulation: {cfg.particle} at {cfg.energy_mev} MeV", 
+                        position='upper_edge', font_size=10)
+        plotter.add_axes()
+        # Создаем имя папки на основе текущей даты и времени
+        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        export_dir = f"out/simulation_visualization_{timestamp}"
+        
+        # Создаем директорию если она не существует
+        os.makedirs(export_dir, exist_ok=True)
+        
+        # Полный путь к HTML файлу
+        html_filename = os.path.join(export_dir, f"simulation_task_{cfg.task_id}.html")
+
+        # Экспорт в HTML
+        plotter.export_html(html_filename)
+        print(f"Визуализация экспортирована в {html_filename}")
+        
+        # Выводим статистику в консоль
+        print("\nParticle type statistics:")
+        for particle_name, count in sorted(particle_counts.items()):
+            print(f"  {particle_name}: {count} tracks")

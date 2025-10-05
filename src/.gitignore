@@ -7,3 +7,7 @@ log.*
 out.*
 test.py
 run.txt
+out
+chtmain.txt
+DataServer.txt
+TrimParser.txt
