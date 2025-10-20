@@ -54,6 +54,13 @@ class SimulationResult(BaseModel):
     created_at: str
     completed_at: str
 
+class SimulationGigaRequest(BaseModel):
+    particle: str = "He3"
+    energy_mev: float = 40.0
+    events: int = 100
+    collect_tracks: bool = False
+    prompt: str
+
 # Функция для запуска симуляции в отдельном процессе
 def run_simulation_process(simulation_id: str, config_dict: dict, result_dir: str):
     """Запускает симуляцию в полностью изолированном процессе"""
@@ -145,6 +152,101 @@ with open("{result_file}", "w") as f:
         except:
             pass
 
+def run_simulation_with_giga(simulation_id: str, config_dict: dict, result_dir: str):
+    """Запускает симуляцию в полностью изолированном процессе"""
+    logger.info(f"run giga simulation {simulation_id}")
+    try:
+        # Создаем временный файл для конфигурации
+        config_file = os.path.join(result_dir, 'config.json')
+        logger.info(f"file {config_file}")
+        with open(config_file, 'w') as f:
+            json.dump(config_dict, f)
+        
+        # Создаем файл для результата
+        result_file = os.path.join(result_dir, 'result.json')
+        logger.info('run python via cmd')
+        # Команда для запуска симуляции
+        cmd = [
+            'python3', '-c', 
+            f'''
+import json
+import sys
+sys.path.insert(0, ".")
+from main import run_simulation, SimulationConfig, run_simulation_with_giga, SimulationGigaConfig
+
+with open("{config_file}", "r") as f:
+    config_dict = json.load(f)
+
+cfg = SimulationGigaConfig(**config_dict)
+result = run_simulation_with_giga(cfg)
+
+with open("{result_file}", "w") as f:
+    json.dump(result.to_dict(), f, indent=2)
+            '''
+        ]
+        
+        # Запускаем процесс
+        process = subprocess.Popen(
+            cmd,
+            cwd=os.getcwd(),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True
+        )
+        logger.info('finished cmd')
+        # Ждем завершения с таймаутом (10 минут)
+        try:
+            stdout, stderr = process.communicate(timeout=600)
+            if process.returncode == 0:
+                # Читаем результат
+                logger.info('read result')
+                if os.path.exists(result_file):
+                    with open(result_file, 'r') as f:
+                        logger.info('opened result file')
+                        result_data = json.load(f)
+                    return {
+                        'status': 'completed',
+                        'result': result_data,
+                        'error': None
+                    }
+                else:
+                    logger.error('error opened file')
+                    return {
+                        'status': 'failed',
+                        'result': None,
+                        'error': 'Result file not found'
+                    }
+            else:
+                return {
+                    'status': 'failed',
+                    'result': None,
+                    'error': f'Process failed: {stderr}'
+                }
+        except subprocess.TimeoutExpired:
+            process.kill()
+            return {
+                'status': 'timeout',
+                'result': None,
+                'error': 'Simulation timed out after 10 minutes'
+            }
+            
+    except Exception as e:
+        return {
+            'status': 'error',
+            'result': None,
+            'error': f'Unexpected error: {str(e)}'
+        }
+    finally:
+        # Очищаем временные файлы
+        try:
+            if os.path.exists(config_file):
+                os.remove(config_file)
+            if os.path.exists(result_file):
+                os.remove(result_file)
+            os.rmdir(result_dir)
+        except:
+            pass
+
 # Фоновая задача для мониторинга симуляции
 async def monitor_simulation(simulation_id: str, config_dict: dict):
     """Мониторит выполнение симуляции в фоне"""
@@ -179,12 +281,39 @@ async def monitor_simulation(simulation_id: str, config_dict: dict):
         })
         logger.error(f"Error monitoring simulation {simulation_id}: {str(e)}")
 
+async def monitor_giga_simulation(simulation_id: str, config_dict: dict):
+    logger.info(f"monitor giga simulation {simulation_id}")
+    try:
+        logger.info("creating directory")
+        # Создаем временную директорию для результатов
+        result_dir = tempfile.mkdtemp(prefix=f'sim_{simulation_id}_')
+        
+        # Обновляем статус
+        simulation_statuses[simulation_id].update({
+            'status': 'running',
+            'result_dir': result_dir
+        })
+        
+        # Запускаем симуляцию в отдельном процессе
+        # result = run_simulation_process(simulation_id, config_dict, result_dir)
+
+        result = run_simulation_with_giga(simulation_id, config_dict, result_dir)
+        logger.info(f"result {result}")
+        
+    except Exception as e:
+        simulation_statuses[simulation_id].update({
+            'status': 'error',
+            'error': f"Monitoring error: {str(e)}",
+            'completed_at': datetime.now().isoformat()
+        })
+        logger.error(f"Error monitoring simulation {simulation_id}: {str(e)}")
+
 # Эндпоинты
 @app.post("/simulate", response_model=SimulationResponse)
 async def simulate(request: SimulationRequest, background_tasks: BackgroundTasks):
     """Запускает новую симуляцию"""
     simulation_id = str(uuid.uuid4())
-    
+
     logger.info(f"Starting simulation {simulation_id} for task_id: {request.task_id}")
     
     # Сохраняем информацию о симуляции (включая simulation_id)
@@ -207,6 +336,23 @@ async def simulate(request: SimulationRequest, background_tasks: BackgroundTasks
         message=f"Simulation {simulation_id} started successfully",
         created_at=simulation_statuses[simulation_id]['created_at']
     )
+
+@app.post("/simulate/giga")
+async def simulate_with_giga(request: SimulationGigaRequest, background_tasks: BackgroundTasks):
+    simulation_id = str(uuid.uuid4())
+    logger.info(f"Starting giga simulation {simulation_id}")
+    # Сохраняем информацию о симуляции (включая simulation_id)
+    simulation_statuses[simulation_id] = {
+        'simulation_id': simulation_id,  # Добавляем simulation_id в данные
+        'status': 'pending',
+        'request': request.model_dump(),  # Используем model_dump() вместо dict()
+        'created_at': datetime.now().isoformat(),
+        'completed_at': None,
+        'result': None,
+        'error': None
+    }
+
+    background_tasks.add_task(monitor_giga_simulation, simulation_id, request.model_dump())  # Используем model_dump()
 
 @app.get("/simulations/{simulation_id}", response_model=SimulationStatus)
 async def get_simulation_status(simulation_id: str):

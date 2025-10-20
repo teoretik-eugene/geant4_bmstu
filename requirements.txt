@@ -22,3 +22,9 @@ trame-vuetify==2.8.1
 python-multipart==0.0.6
 matplotlib==3.7.2
 geant4-pybind==0.1.0b12
+langchain_gigachat
+langgraph
+ddgs
+langchain_tavily
+rich
+python-dotenv

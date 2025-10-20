@@ -12,6 +12,13 @@ import atexit
 import gc
 import os
 import datetime
+from dotenv import load_dotenv
+from giga_tools import *
+from langchain_gigachat.chat_models import GigaChat
+import logging
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 _geant4_initialized = False
 
@@ -21,6 +28,20 @@ _geant4_initialized = False
 @dataclass
 class SimulationConfig:
     task_id: Optional[int] = None
+    input_data: Optional[dict] = None
+    particle: str = "He3"
+    energy_mev: float = 40.0
+    events: int = 10
+    world_xy_mm: float = 500.0
+    world_z_mm: float = 500.0
+    screen_xy_mm: float = 250.0
+    first_screen_z_mm: float = 15.0
+    collect_tracks: bool = False
+    visualize: bool = False
+
+@dataclass
+class SimulationGigaConfig:
+    prompt: str = "Помоги составить экран"
     input_data: Optional[dict] = None
     particle: str = "He3"
     energy_mev: float = 40.0
@@ -424,6 +445,45 @@ def run_simulation(cfg: SimulationConfig) -> SimulationResult:
     runner = SimulationRunner()
     return runner.run(cfg)
 
+def convert_screen_info_to_data(screen: ScreenInfo) -> dict:
+    return {
+        "Screen": screen.to_dict()
+    }
+
+def run_simulation_with_giga(cfg: SimulationGigaConfig):
+    logger.info('run simulation with giga main')
+    load_dotenv()
+    GIGACHAT_CREDENTIALS = os.getenv('GIGACHAT_CREDENTIALS')
+
+    llm = GigaChat(
+        model="GigaChat-2-Max",
+        credentials=GIGACHAT_CREDENTIALS,
+        scope="GIGACHAT_API_PERS",
+        top_p=0, 
+        timeout=120, 
+        ca_bundle_file='russian_trusted_root_ca_pem.crt'
+    )
+
+    structed_llm = llm.with_structured_output(ScreenInfo)
+    logger.info('request for llm')
+    result = structed_llm.invoke(cfg.prompt)
+    logger.info(result)
+
+    data = convert_screen_info_to_data(result)
+    logger.info(f'data: {data}')
+
+    run_config = SimulationConfig(input_data=data, 
+                                  particle=cfg.particle, 
+                                  energy_mev=cfg.energy_mev,
+                                  events=cfg.events)
+    
+    runner = SimulationRunner()
+    res = runner.run(run_config)
+    print(json.dumps(res.to_dict(), indent=2, ensure_ascii=False))
+
+    return res
+
+
 if __name__ == "__main__":
     ds = DataServer()
     task_id = 9
@@ -473,7 +533,6 @@ if __name__ == "__main__":
         # draw tracks with particle-type coloring
         particle_counts = {}
         
-        # ИСПРАВЛЕНИЕ: используем tracks из результата симуляции
         for track_key, pts in res.tracks.items():
             if len(pts) >= 2:
                 event_id, track_id = track_key
