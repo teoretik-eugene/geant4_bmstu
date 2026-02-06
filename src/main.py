@@ -486,14 +486,14 @@ def run_simulation_with_giga(cfg: SimulationGigaConfig):
 
 if __name__ == "__main__":
     ds = DataServer()
-    task_id = 9
+    task_id = 103
     data = ds.get_current_task_to_json(task_id)
     cfg = SimulationConfig(
         task_id=task_id,
         input_data=data,
         particle="He3",
         energy_mev=60.0,
-        events=10,
+        events=50,
         collect_tracks=True,
         visualize=True,
     )

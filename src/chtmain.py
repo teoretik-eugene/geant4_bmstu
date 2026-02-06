@@ -920,19 +920,70 @@ def visualize_single_particle_results(cfg: SimulationConfig, result: SimulationR
 
 if __name__ == "__main__":
     ds = DataServer()
-    task_id = 9
-    data = ds.get_current_task_to_json(task_id)
+    task_id = 103
+    
+    # Использовать подготовленные данные, сгенерированные LLM
+    data = {
+        "Screen": {
+            "Name": "Экран из Be и ВТ5Л",
+            "Description": "Экран состоит из двух слоев: Be и ВТ5Л. Первый слой толщиной 1000 мкм, второй слой толщиной 2000 мкм. В первом слое материал Be (Бериллий), во втором слое материал ВТ5Л (Титановый сплав ВТ5Л). В слое ВТ5Л содержится 90% Ti (Титан) и 10% Al (Алюминий).",
+            "Materials": [
+                {
+                    "Name": "Be",
+                    "Description": "Бериллий (Be) толщиной 1000 мкм",
+                    "Width": 1000.0,
+                    "Elements": [
+                        {
+                            "Name": "Бериллий",
+                            "Symbol": "Be",
+                            "Atomic_number": 4,
+                            "Standard_atomic_weight": 9.012,
+                            "Density": 1.85,
+                            "Percentage": 100.0
+                        }
+                    ]
+                },
+                {
+                    "Name": "ВТ5Л",
+                    "Description": "Титановый сплав ВТ5Л толщиной 2000 мкм. Состоит из 90% Ti (Титан) и 10% Al (Алюминий).",
+                    "Width": 2000.0,
+                    "Elements": [
+                        {
+                            "Name": "Титан",
+                            "Symbol": "Ti",
+                            "Atomic_number": 22,
+                            "Standard_atomic_weight": 47.867,
+                            "Density": 4.51,
+                            "Percentage": 90.0
+                        },
+                        {
+                            "Name": "Алюминий",
+                            "Symbol": "Al",
+                            "Atomic_number": 13,
+                            "Standard_atomic_weight": 26.982,
+                            "Density": 2.7,
+                            "Percentage": 10.0
+                        }
+                    ]
+                }
+            ]
+        }
+    }
+    '''
+    Использовать для получения данных по task_id с сайта (раскоментировать строку)
+    '''
+    # data = ds.get_current_task_to_json(task_id)
     
     # Пример: Мульти-частичный последовательный режим
     cfg_multi = SimulationConfig(
         task_id=task_id,
         input_data=data,
         particles=[
-            ParticleConfig(name="He3", energy_mev=30.0),
-            ParticleConfig(name="proton", energy_mev=30.0)
-            # ParticleConfig(name="e-", energy_mev=20.0),
+            ParticleConfig(name="He3", energy_mev=60.0),
+            ParticleConfig(name="proton", energy_mev=30.0),
+            ParticleConfig(name="e-", energy_mev=20.0)
         ],
-        events=10,
+        events=30,
         collect_tracks=True,
         visualize=True,
         use_mixed_beam=False  # Последовательные запуски в отдельных процессах
