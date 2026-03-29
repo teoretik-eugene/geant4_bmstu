@@ -13,3 +13,7 @@ struct_giga_main.py
 *.crt
 .env
 test*.json
+
+Dockerfile.txt
+app.log
+main.txt

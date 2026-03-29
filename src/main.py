@@ -12,6 +12,8 @@ import datetime
 import random
 import multiprocessing as mp
 from concurrent.futures import ProcessPoolExecutor, as_completed
+from simulations import ParticleConfig, SimulationConfig, SingleParticleResult, SimulationResult
+from utils import compute_layout
 
 import logging
 
@@ -24,121 +26,6 @@ logging.basicConfig(
 )
 
 _geant4_initialized = False
-
-# -----------------------------
-# Конфиги и результаты
-# -----------------------------
-@dataclass
-class ParticleConfig:
-    name: str
-    energy_mev: float
-    weight: float = 1.0  # Для смешанного пучка
-
-@dataclass
-class SimulationConfig:
-    task_id: Optional[int] = None
-    input_data: Optional[dict] = None
-    # Одиночная частица (обратная совместимость)
-    particle: str = "He3"
-    energy_mev: float = 40.0
-    # Мульти-частичный режим
-    particles: List[ParticleConfig] = field(default_factory=list)
-    use_mixed_beam: bool = False  # True - смешанный пучок, False - последовательные запуски
-    events: int = 10
-    world_xy_mm: float = 500.0
-    world_z_mm: float = 500.0
-    screen_xy_mm: float = 250.0
-    first_screen_z_mm: float = 15.0
-    collect_tracks: bool = False
-    visualize: bool = False
-
-    def __post_init__(self):
-        # Автоматическое создание particles из устаревших полей
-        if not self.particles and self.particle:
-            self.particles = [ParticleConfig(name=self.particle, energy_mev=self.energy_mev)]
-        
-        # Преобразуем словари обратно в ParticleConfig если нужно
-        converted_particles = []
-        for p in self.particles:
-            if isinstance(p, dict):
-                converted_particles.append(ParticleConfig(**p))
-            else:
-                converted_particles.append(p)
-        self.particles = converted_particles
-
-@dataclass
-class SingleParticleResult:
-    particle: str
-    energy_mev: float
-    screen_info: Dict[str, Any]
-    total_particles: int
-    total_out_primary_particles: int
-    total_out_secondary_particles: int
-    tracks: Optional[Dict[Tuple[int, int], List[Tuple[float, float, float]]]] = None
-
-    def to_dict(self) -> dict:
-        d = asdict(self)
-        if self.tracks is not None:
-            d["tracks"] = {f"{k[0]}:{k[1]}": v for k, v in self.tracks.items()}
-        return d
-
-@dataclass
-class SimulationResult:
-    # Для одиночной частицы
-    screen_info: Optional[Dict[str, Any]] = None
-    total_particles: Optional[int] = None
-    total_out_primary_particles: Optional[int] = None
-    total_out_secondary_particles: Optional[int] = None
-    tracks: Optional[Dict[Tuple[int, int], List[Tuple[float, float, float]]]] = None
-    
-    # Для мульти-частичного режима
-    particle_results: Optional[Dict[str, SingleParticleResult]] = None
-    mixed_beam_result: Optional[Dict[str, Any]] = None
-    comparison: Optional[Dict[str, Any]] = None
-
-    energy_profiles: Optional[Dict] = None
-    exit_energies: Optional[List[float]] = None
-    
-    def to_dict(self) -> dict:
-        d = asdict(self)
-        
-        # Обработка tracks для одиночной частицы
-        if self.tracks is not None:
-            d["tracks"] = {f"{k[0]}:{k[1]}": v for k, v in self.tracks.items()}
-        
-        # Обработка particle_results
-        if self.particle_results is not None:
-            d["particle_results"] = {
-                key: value.to_dict() for key, value in self.particle_results.items()
-            }
-        
-        return d
-
-def compute_layout(cfg: SimulationConfig, data: dict) -> dict:
-    tp = TrimParser(data)
-    mats = tp.readMaterials()
-    thicknesses = [float(m.get("Width")) / 1000.0 for m in mats]  # мкм → мм
-    total_thickness_mm = sum(thicknesses)
-    world_z_mm_needed = cfg.first_screen_z_mm + total_thickness_mm + 50.0
-    world_z_mm_local = max(cfg.world_z_mm, world_z_mm_needed)
-    half_world_z_mm = 0.5 * world_z_mm_local
-    first_screen_front_z_mm = -half_world_z_mm + cfg.first_screen_z_mm
-    centers = []
-    z_cursor = first_screen_front_z_mm
-    for th in thicknesses:
-        centers.append(z_cursor + 0.5 * th)
-        z_cursor += th
-    screens_end_z_mm = first_screen_front_z_mm + total_thickness_mm
-
-    return dict(
-        thicknesses_mm=thicknesses,
-        total_thickness_mm=total_thickness_mm,
-        world_z_mm_local=world_z_mm_local,
-        half_world_z_mm=half_world_z_mm,
-        first_screen_front_z_mm=first_screen_front_z_mm,
-        first_screen_centers_mm=centers,
-        screens_end_z_mm=screens_end_z_mm,
-    )
 
 class TrackCollector:
     def __init__(self, enabled: bool = False) -> None:
@@ -850,7 +737,7 @@ def run_simulation(cfg: SimulationConfig) -> SimulationResult:
     runner = SimulationRunner()
     return runner.run(cfg)
 
-def plot_energy_analysis(result: SimulationResult, cfg: SimulationConfig, dir: str):
+def plot_energy_analysis(result: SimulationResult, cfg: SimulationConfig, data: dict, dir: str):
     import matplotlib.pyplot as plt
     import os
     import datetime
@@ -858,22 +745,22 @@ def plot_energy_analysis(result: SimulationResult, cfg: SimulationConfig, dir: s
     # Создаем папку
     out_dir = f"{dir}/energy_analysis"
     os.makedirs(out_dir, exist_ok=True)
-
+    layout = compute_layout(cfg=cfg, data=data)
     # =============================
-    # 📈 1. Energy vs Depth
+    # Energy vs Depth
     # =============================
-    logging.info(f'energy depth')
     if hasattr(result, "energy_profiles") and result.energy_profiles:
         plt.figure()
-        logging.info(f'has attribute')
         first_z = None
         end_z = None
 
         logging.info(f'plot result screen info: {result}')
 
-        if result.screen_info and "layout" in result.screen_info:
-            first_z = result.screen_info["layout"]["first_screen_front_z_mm"]
-            end_z = result.screen_info["layout"]["screens_end_z_mm"]
+        if result.screen_info:
+            first_z = layout["first_screen_front_z_mm"]
+            end_z = layout["screens_end_z_mm"]
+
+            logging.info(f'first_z :{first_z}\tend_z: {end_z}')
 
             logging.info(f'first screen coord: {first_z}')
 
@@ -903,14 +790,15 @@ def plot_energy_analysis(result: SimulationResult, cfg: SimulationConfig, dir: s
 
             if end_z is not None:
                 screen_thickness = end_z - first_z
-                plt.axvline(0, linestyle="--", label="Screen start")
-                plt.axvline(screen_thickness, linestyle="--", label="Screen end")
 
-            plt.xlabel("Z relative to screen (mm)")
-            plt.ylabel("Energy (MeV)")
-            plt.title("Energy vs Depth (relative to screen)")
-            plt.grid()
-            plt.legend()
+        plt.xlabel("Z relative to screen (mm)")
+        plt.ylabel("Energy (MeV)")
+        plt.title("Energy vs Depth (relative to screen)")
+        plt.grid()
+        plt.legend()
+
+        plt.axvline(0, linestyle="--", label="Screen start")
+        plt.axvline(screen_thickness, linestyle="--", label="Screen end")
 
         plt.xlabel("Depth (mm)")
         plt.ylabel("Energy (MeV)")
@@ -923,7 +811,7 @@ def plot_energy_analysis(result: SimulationResult, cfg: SimulationConfig, dir: s
         print(f"Saved: {filename}")
 
     # =============================
-    # 📊 2. Energy spectrum (exit)
+    # Energy spectrum (exit)
     # =============================
     if hasattr(result, "exit_energies") and result.exit_energies:
         plt.figure()
@@ -941,7 +829,7 @@ def plot_energy_analysis(result: SimulationResult, cfg: SimulationConfig, dir: s
         print(f"Saved: {filename}")
 
     # =============================
-    # 📦 3. Energy deposition per layer
+    # Energy deposition per layer
     # =============================
     if result.screen_info and "Materials" in result.screen_info:
         materials = result.screen_info["Materials"]
@@ -968,7 +856,7 @@ def plot_energy_analysis(result: SimulationResult, cfg: SimulationConfig, dir: s
         plt.close()
         print(f"Saved: {filename}")
 
-    print(f"\n📁 All plots saved in: {out_dir}")
+    print(f"\nAll plots saved in: {out_dir}")
 
 def visualize_multi_particle_results(cfg: SimulationConfig, result: SimulationResult, input_data: dict, dir: str):
     """Визуализация результатов для мульти-частичного режима"""
@@ -1243,4 +1131,4 @@ if __name__ == "__main__":
             print("Нет данных для визуализации (треки не собраны)")
 
         # Новый анализ энергии
-        plot_energy_analysis(result, cfg_multi, dir=export_dir)
+        plot_energy_analysis(result, cfg_multi, data=data, dir=export_dir)
