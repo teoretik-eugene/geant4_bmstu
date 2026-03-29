@@ -38,3 +38,41 @@ def compute_layout(cfg: SimulationConfig, data: dict) -> dict:
         first_screen_centers_mm=centers,
         screens_end_z_mm=screens_end_z_mm,
     )
+
+def is_primary(track_data):
+    return track_data["parent_id"] == 0
+
+def get_particle_color(particle_name):
+        """Возвращает цвет для конкретного типа частицы"""
+        color_map = {
+            # Первичные частицы
+            "he3": "blue",
+            "alpha": "darkblue",
+            "proton": "red",
+            "neutron": "gray",
+            "e-": "green",
+            "e+": "lightgreen",
+            "gamma": "yellow",
+            "mu-": "purple",
+            "mu+": "violet",
+            "pi+": "orange",
+            "pi-": "darkorange",
+            "kaon+": "brown",
+            "kaon-": "sandybrown",
+            "deuteron": "cyan",
+            "triton": "darkcyan",
+            # По умолчанию
+            "primary": "blue",
+            "unknown": "black"
+        }
+        particle_name = str(particle_name).lower()
+
+        for key, color in color_map.items():
+            if key.lower() == particle_name:
+                return color
+            
+        for key, color in color_map.items():
+            if key.lower() in particle_name or particle_name in key.lower():
+                return color
+            
+        return color_map["unknown"]

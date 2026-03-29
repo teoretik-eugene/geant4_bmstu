@@ -13,7 +13,8 @@ import random
 import multiprocessing as mp
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from simulations import ParticleConfig, SimulationConfig, SingleParticleResult, SimulationResult
-from utils import compute_layout
+from utils import compute_layout, is_primary, get_particle_color
+from vis_graph import plot_energy_analysis
 
 import logging
 
@@ -33,7 +34,13 @@ class TrackCollector:
         self._data: Dict[Tuple[int, int], List[Tuple[float, float, float]]] = {}
         self._particle_types: Dict[Tuple[int, int], str] = {}  # Новое: храним типы частиц
 
-        self._energy_profiles = {}   # (event_id, track_id) -> [(z, E)]
+        self._energy_profiles = {}
+        # key = (event_id, track_id)
+        # value = {
+        #     "parent_id": int,
+        #     "particle": str,
+        #     "points": [(z, E)]
+        # }
         self._exit_energies = []    # энергии на выходе
     
     def add(self, event_id: int, track_id: int, pos: g4.G4ThreeVector, particle_type: str = None) -> None:
@@ -43,10 +50,19 @@ class TrackCollector:
         if particle_type and (event_id, track_id) not in self._particle_types:
             self._particle_types[(event_id, track_id)] = particle_type
 
-    def add_energy(self, event_id, track_id, z, energy):
+    def add_energy(self, event_id, track_id, parent_id, particle_type, z, energy):
         if not self.enabled:
             return
-        self._energy_profiles.setdefault((event_id, track_id), []).append((z, energy))
+        key = (event_id, track_id)
+
+        if key not in self._energy_profiles:
+            self._energy_profiles[key] = {
+                "parent_id": parent_id,
+                "particle": particle_type,
+                "points": []
+            }
+
+        self._energy_profiles[key]["points"].append((z, energy))
     
     def add_exit_energy(self, energy):
         if not self.enabled:
@@ -130,8 +146,10 @@ class ScreenGeometry(g4.G4VUserDetectorConstruction):
                 g4mat.AddElement(element, frac=(fr / total_fraction))
             material_defs.append((g4mat, thickness_mm * g4.mm, mat_name))
         logging.info(f"Screen info: {self.screen_info}")
+
         world_xy_mm_local = max(self.cfg.world_xy_mm, self.cfg.screen_xy_mm + 50.0)
         solid_world = g4.G4Box("World", 0.5 * world_xy_mm_local * g4.mm, 0.5 * world_xy_mm_local * g4.mm, 0.5 * world_z_mm_local * g4.mm)
+        
         self.logic_world = g4.G4LogicalVolume(solid_world, nist.FindOrBuildMaterial("G4_AIR"), "World")
         phys_world = g4.G4PVPlacement(None, g4.G4ThreeVector(), self.logic_world, "World", None, False, 0, check_overlaps)
         z_cursor = first_screen_front_z_mm * g4.mm
@@ -213,18 +231,12 @@ class ScreenSteppingAction(g4.G4UserSteppingAction):
         post = step.GetPostStepPoint()
         pos = post.GetPosition()
         track = step.GetTrack()
+        parent_id = track.GetParentID()
 
         kin_energy = track.GetKineticEnergy() / g4.MeV
         z_pos = pos.z / g4.mm
         # print("EVENT ID:", self.event_action.event_id)
         # print(f'EVENT ID: {self.event_action.event_id}\tTRACK ID: {track.GetTrackID()}\tkinenergy: {kin_energy}')
-        if self.event_action.event_id is not None:
-            self.tracks.add_energy(
-                self.event_action.event_id,
-                track.GetTrackID(),
-                z_pos,
-                kin_energy
-            )
         
         # Получаем тип частицы из Geant4
         particle_name = "unknown"
@@ -246,6 +258,16 @@ class ScreenSteppingAction(g4.G4UserSteppingAction):
         # Для первичных частиц в смешанном пучке добавляем информацию о типе
         if track.GetTrackID() == 1 and self.current_particle and self.current_particle != "mixed":
             particle_name = self.current_particle
+
+        if self.event_action.event_id is not None:
+            self.tracks.add_energy(
+                event_id=self.event_action.event_id,
+                track_id=track.GetTrackID(),
+                particle_type=particle_name,
+                parent_id=parent_id,
+                z=z_pos,
+                energy=kin_energy
+            )
         
         if self.event_action.event_id is not None:
             self.tracks.add(self.event_action.event_id, track.GetTrackID(), pos, particle_name)
@@ -682,46 +704,6 @@ def _cleanup_geant4():
 
 atexit.register(_cleanup_geant4)
 
-def get_particle_color(particle_name):
-    """Возвращает цвет для конкретного типа частицы"""
-    color_map = {
-        # Первичные частицы
-        "He3": "blue",
-        "alpha": "darkblue",
-        "proton": "red",
-        "neutron": "gray",
-        "e-": "green",
-        "e+": "lightgreen",
-        "gamma": "yellow",
-        "mu-": "purple",
-        "mu+": "violet",
-        "pi+": "orange",
-        "pi-": "darkorange",
-        "kaon+": "brown",
-        "kaon-": "sandybrown",
-        "deuteron": "cyan",
-        "triton": "darkcyan",
-        
-        # По умолчанию
-        "primary": "blue",
-        "unknown": "black"
-    }
-    
-    # Нормализуем имя частицы
-    particle_name = str(particle_name).lower()
-    
-    # Ищем точное совпадение
-    for key, color in color_map.items():
-        if key.lower() == particle_name:
-            return color
-    
-    # Ищем частичное совпадение
-    for key, color in color_map.items():
-        if key.lower() in particle_name or particle_name in key.lower():
-            return color
-    
-    return color_map["unknown"]
-
 def export_to_html(plotter, filename="visualization.html"):
     """Экспортирует сцену PyVista в HTML файл"""
     try:
@@ -736,127 +718,6 @@ def export_to_html(plotter, filename="visualization.html"):
 def run_simulation(cfg: SimulationConfig) -> SimulationResult:
     runner = SimulationRunner()
     return runner.run(cfg)
-
-def plot_energy_analysis(result: SimulationResult, cfg: SimulationConfig, data: dict, dir: str):
-    import matplotlib.pyplot as plt
-    import os
-    import datetime
-
-    # Создаем папку
-    out_dir = f"{dir}/energy_analysis"
-    os.makedirs(out_dir, exist_ok=True)
-    layout = compute_layout(cfg=cfg, data=data)
-    # =============================
-    # Energy vs Depth
-    # =============================
-    if hasattr(result, "energy_profiles") and result.energy_profiles:
-        plt.figure()
-        first_z = None
-        end_z = None
-
-        logging.info(f'plot result screen info: {result}')
-
-        if result.screen_info:
-            first_z = layout["first_screen_front_z_mm"]
-            end_z = layout["screens_end_z_mm"]
-
-            logging.info(f'first_z :{first_z}\tend_z: {end_z}')
-
-            logging.info(f'first screen coord: {first_z}')
-
-        if first_z is None:
-            first_z = 0
-
-        for track_key, data in result.energy_profiles.items():
-            if len(data) < 2:
-                continue
-            z = [p[0] for p in data]
-            E = [p[1] for p in data]
-
-            z_rel = [zi - first_z for zi in z]
-
-            # фильтр: внутри экрана + немного после
-            filtered = [
-                (zr, e) for zr, e in zip(z_rel, E)
-                if -5 <= zr <= (end_z - first_z + 10 if end_z else 100)
-            ]
-
-            if len(filtered) < 2:
-                continue
-
-            zf, Ef = zip(*filtered)
-
-            plt.plot(zf, Ef, alpha=0.3)
-
-            if end_z is not None:
-                screen_thickness = end_z - first_z
-
-        plt.xlabel("Z relative to screen (mm)")
-        plt.ylabel("Energy (MeV)")
-        plt.title("Energy vs Depth (relative to screen)")
-        plt.grid()
-        plt.legend()
-
-        plt.axvline(0, linestyle="--", label="Screen start")
-        plt.axvline(screen_thickness, linestyle="--", label="Screen end")
-
-        plt.xlabel("Depth (mm)")
-        plt.ylabel("Energy (MeV)")
-        plt.title("Energy vs Depth")
-        plt.grid()
-
-        filename = os.path.join(out_dir, "energy_vs_depth.png")
-        plt.savefig(filename)
-        plt.close()
-        print(f"Saved: {filename}")
-
-    # =============================
-    # Energy spectrum (exit)
-    # =============================
-    if hasattr(result, "exit_energies") and result.exit_energies:
-        plt.figure()
-
-        plt.hist(result.exit_energies, bins=30)
-
-        plt.xlabel("Energy (MeV)")
-        plt.ylabel("Counts")
-        plt.title("Exit Energy Spectrum")
-        plt.grid()
-
-        filename = os.path.join(out_dir, "exit_energy_spectrum.png")
-        plt.savefig(filename)
-        plt.close()
-        print(f"Saved: {filename}")
-
-    # =============================
-    # Energy deposition per layer
-    # =============================
-    if result.screen_info and "Materials" in result.screen_info:
-        materials = result.screen_info["Materials"]
-
-        names = []
-        edep = []
-
-        for mat in materials:
-            names.append(mat["Name"])
-            edep.append(mat.get("Edep", 0))
-
-        plt.figure()
-
-        plt.bar(names, edep)
-
-        plt.xlabel("Material")
-        plt.ylabel("Deposited Energy (MeV)")
-        plt.title("Energy Deposition per Layer")
-        plt.xticks(rotation=30)
-        plt.grid(axis='y')
-
-        filename = os.path.join(out_dir, "energy_deposition.png")
-        plt.savefig(filename)
-        plt.close()
-        print(f"Saved: {filename}")
-
-    print(f"\nAll plots saved in: {out_dir}")
 
 def visualize_multi_particle_results(cfg: SimulationConfig, result: SimulationResult, input_data: dict, dir: str):
     """Визуализация результатов для мульти-частичного режима"""
@@ -1099,9 +960,9 @@ if __name__ == "__main__":
         task_id=task_id,
         input_data=data,
         particles=[
-            ParticleConfig(name="He3", energy_mev=30.0),
-            ParticleConfig(name="proton", energy_mev=25.0)
-            # ParticleConfig(name="e-", energy_mev=20.0)
+            ParticleConfig(name="He3", energy_mev=40.0),
+            ParticleConfig(name="proton", energy_mev=60.0),
+            ParticleConfig(name="e-", energy_mev=30.0)
         ],
         events=30,
         collect_tracks=True,
