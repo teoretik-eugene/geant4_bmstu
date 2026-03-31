@@ -180,31 +180,62 @@ class ScreenSensitiveDetector(g4.G4VSensitiveDetector):
     def __init__(self, name, screen_info):
         super().__init__(name)
         self.screen_info = screen_info
+        self.stopped_tracks = set()
 
     def ProcessHits(self, aStep: g4.G4Step, _hist):
         track = aStep.GetTrack()
+        track_id = track.GetTrackID()
+
+        kin_energy = track.GetKineticEnergy() / g4.MeV
+
+        track_status = track.GetTrackStatus()
+
+        pos = aStep.GetPostStepPoint().GetPosition()
+        z_mm = pos.z / g4.mm
 
         # энергия, оставленная в шаге
         edep = aStep.GetTotalEnergyDeposit() / g4.MeV
 
-        vol_name = track.GetVolume().GetName()
-        try:
-            idx = int(str(vol_name).split("_")[-1])
-        except Exception:
-            return True
+        vol_name = track.GetVolume().GetName() if track.GetVolume() else ""
 
-        # добавляем энергию в слой
-        if "Edep" not in self.screen_info["Materials"][idx]:
-            self.screen_info["Materials"][idx]["Edep"] = 0.0
+        is_stopped = False
+        
+        # Кинетическая энергия близка к 0 (с порогом)
+        if kin_energy < 1e-6:  # 1 эВ порог
+            is_stopped = True
 
-        self.screen_info["Materials"][idx]["Edep"] += edep
+        if track_status == g4.fStopAndKill or track_status == g4.fStopButAlive:
+            is_stopped = True
 
-        # старый функционал
-        if track.GetKineticEnergy() == 0:
-            if track.GetTrackID() == 1:
-                self.screen_info["Materials"][idx]["Primary_stuck_count"] += 1
-            else:
-                self.screen_info["Materials"][idx]["Secondary_stuck_count"] += 1
+        if is_stopped and track_id not in self.stopped_tracks:
+            # Проверяем, что внутри экрана
+            if "Screen" in vol_name:
+                try:
+                    idx = int(str(vol_name).split("_")[-1])
+                    
+                    # Добавляем в статистику
+                    if track.GetParentID() == 0:
+                        self.screen_info["Materials"][idx]["Primary_stuck_count"] += 1
+                        logging.info(f"Primary track {track_id} stopped in {vol_name} at Z={z_mm:.2f} mm")
+                    else:
+                        self.screen_info["Materials"][idx]["Secondary_stuck_count"] += 1
+                        logging.info(f"Secondary track {track_id} stopped in {vol_name} at Z={z_mm:.2f} mm")
+                    
+                    # Помечаем трек как обработанный
+                    self.stopped_tracks.add(track_id)
+                    
+                except Exception as e:
+                    logging.error(f"Error processing stopped track: {e}")
+            
+        edep = aStep.GetTotalEnergyDeposit() / g4.MeV
+        if edep > 0:
+            try:
+                idx = int(str(vol_name).split("_")[-1])
+                if "Edep" not in self.screen_info["Materials"][idx]:
+                    self.screen_info["Materials"][idx]["Edep"] = 0.0
+                self.screen_info["Materials"][idx]["Edep"] += edep
+            except:
+                pass
 
         return True
 
@@ -227,7 +258,7 @@ class ScreenSteppingAction(g4.G4UserSteppingAction):
         self.tracks = tracks
         self.current_particle = current_particle
     
-    def UserSteppingAction(self, step):
+    def UserSteppingAction(self, step: g4.G4Step):
         post = step.GetPostStepPoint()
         pos = post.GetPosition()
         track = step.GetTrack()
@@ -962,7 +993,7 @@ if __name__ == "__main__":
         particles=[
             ParticleConfig(name="He3", energy_mev=40.0),
             ParticleConfig(name="proton", energy_mev=60.0),
-            ParticleConfig(name="e-", energy_mev=30.0)
+            ParticleConfig(name="e-", energy_mev=60.0)
         ],
         events=30,
         collect_tracks=True,
