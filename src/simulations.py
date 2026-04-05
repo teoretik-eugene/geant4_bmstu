@@ -120,18 +120,6 @@ class SimulationResult:
                 }
             d["energy_profiles"] = energy_profiles_json
         
-        # if self.exit_energies is not None:
-        #     d["exit_energies"] = {
-        #         "values": self.exit_energies,
-        #         "count": len(self.exit_energies),
-        #         "min": min(self.exit_energies) if self.exit_energies else None,
-        #         "max": max(self.exit_energies) if self.exit_energies else None,
-        #         "mean": sum(self.exit_energies) / len(self.exit_energies),
-        #         "std": (sum((e - sum(self.exit_energies)/len(self.exit_energies))**2 
-        #                for e in self.exit_energies) / len(self.exit_energies))**0.5 
-        #                if len(self.exit_energies) > 1 else None
-        #     }
-        
         if self.energy_summary is not None:
             d["energy_summary"] = self.energy_summary
         

@@ -521,7 +521,7 @@ class SingleProcessSimulationRunner:
         logging.info(f"simulation tracks: {tracks.exit_energies}")
         logging.info(f"sum energy {sum(tracks.exit_energies) / len(tracks.exit_energies)}")
 
-        energy_summary = _compute_energy_summary(tracks, layout)
+        energy_summary = _compute_energy_summary(tracks.energy_profiles, tracks.exit_energies, layout)
         logging.info(f'energy summary: {energy_summary}')
 
         result = SimulationResult(
@@ -573,29 +573,34 @@ class SingleProcessSimulationRunner:
         
         return stats
     
-def _compute_energy_summary(tracks: TrackCollector, layout: dict) -> dict:
+def _compute_energy_summary(energy_profiles: dict, exit_energies: list, layout: dict) -> dict:
         """Вычисляет сводную статистику по энергии"""
-        logging.info(f'track energy profiles: {tracks.energy_profiles}')
-        if not tracks.energy_profiles:
-            logging.info(f'not')
+        if not energy_profiles:
             return {}
         
         first_z = layout.get("first_screen_front_z_mm", 0)
         screen_thickness = layout.get("screens_end_z_mm", 0) - first_z
         
+        exit_energies_float = []
+        if exit_energies:
+            for e in exit_energies:
+                try:
+                    exit_energies_float.append(float(e))
+                except (ValueError, TypeError):
+                    logging.warning(f"Invalid energy value: {e}, skipping")
+        
         # Статистика по первичным частицам
         primary_profiles = [
-            p for p in tracks.energy_profiles.values() 
+            p for p in energy_profiles.values() 
             if p.get("parent_id", 0) == 0
         ]
-        logging.info(f'primary: {primary_profiles}')
+        
         # Статистика по вторичным частицам
         secondary_profiles = [
-            p for p in tracks.energy_profiles.values() 
+            p for p in energy_profiles.values() 
             if p.get("parent_id", 0) != 0
         ]
         
-        # Подсчёт остановившихся частиц
         stopped_primary = 0
         stopped_secondary = 0
         energy_loss_primary = []
@@ -604,20 +609,26 @@ def _compute_energy_summary(tracks: TrackCollector, layout: dict) -> dict:
         for profile in primary_profiles:
             points = profile.get("points", [])
             if len(points) >= 2:
-                e_start = points[0][1]
-                e_end = points[-1][1]
-                if e_end < 0.001:  # Остановилась
-                    stopped_primary += 1
-                energy_loss_primary.append(e_start - e_end)
+                try:
+                    e_start = float(points[0][1])
+                    e_end = float(points[-1][1])
+                    if e_end < 0.001:
+                        stopped_primary += 1
+                    energy_loss_primary.append(e_start - e_end)
+                except (ValueError, TypeError, IndexError):
+                    continue
         
         for profile in secondary_profiles:
             points = profile.get("points", [])
             if len(points) >= 2:
-                e_start = points[0][1]
-                e_end = points[-1][1]
-                if e_end < 0.001:  # Остановилась
-                    stopped_secondary += 1
-                energy_loss_secondary.append(e_start - e_end)
+                try:
+                    e_start = float(points[0][1])
+                    e_end = float(points[-1][1])
+                    if e_end < 0.001:
+                        stopped_secondary += 1
+                    energy_loss_secondary.append(e_start - e_end)
+                except (ValueError, TypeError, IndexError):
+                    continue
         
         return {
             "primary_particles": {
@@ -642,13 +653,12 @@ def _compute_energy_summary(tracks: TrackCollector, layout: dict) -> dict:
                 "end_z_mm": layout.get("screens_end_z_mm", 0)
             },
             "exit_energies": {
-                "count": len(tracks.exit_energies),
-                "min": min(tracks.exit_energies) if tracks.exit_energies else None,
-                "max": max(tracks.exit_energies) if tracks.exit_energies else None,
-                "mean": sum(tracks.exit_energies) / len(tracks.exit_energies) if tracks.exit_energies else None
+                "count": len(exit_energies_float),
+                "min": min(exit_energies_float) if exit_energies_float else None,
+                "max": max(exit_energies_float) if exit_energies_float else None,
+                "mean": sum(exit_energies_float) / len(exit_energies_float) if exit_energies_float else None
             }
         }
-
 # -----------------------------
 # Запуск симуляции
 # -----------------------------
@@ -765,15 +775,27 @@ class SimulationRunner:
         comparison = self._create_comparison(particle_results)
         logging.info(f'all_exit_energies: {all_exit_energies}')
 
+        layout = compute_layout(cfg=cfg, data=data)
+        energy_summary = _compute_energy_summary(
+            energy_profiles=all_energy_profiles,
+            exit_energies=all_exit_energies,
+            layout=layout
+        )
+        logging.info(f'res emergy summary: {energy_summary}')
+
         sim_res = SimulationResult(
             particle_results=particle_results,
             comparison=comparison,
             screen_info=all_screen_info,
-            total_out_primary_particles=result_dict["total_out_primary_particles"],
-            total_out_secondary_particles=result_dict["total_out_secondary_particles"],
+            total_out_primary_particles=sum(
+                r.total_out_primary_particles for r in particle_results.values()
+            ),
+            total_out_secondary_particles=sum(
+                r.total_out_secondary_particles for r in particle_results.values()
+            ),
             energy_profiles=all_energy_profiles,
             exit_energies=all_exit_energies,
-            energy_summary=all_energy_summary
+            energy_summary=energy_summary
         )
         logging.info(f"final simulation results: {sim_res}")
         return sim_res
