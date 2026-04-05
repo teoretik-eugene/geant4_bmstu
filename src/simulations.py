@@ -75,6 +75,7 @@ class SimulationResult:
 
     energy_profiles: Optional[Dict] = None
     exit_energies: Optional[List[float]] = None
+    energy_summary: Optional[Dict] = None
     
     def to_dict(self) -> dict:
         d = asdict(self)
@@ -82,6 +83,57 @@ class SimulationResult:
         # Обработка tracks для одиночной частицы
         if self.tracks is not None:
             d["tracks"] = {f"{k[0]}:{k[1]}": v for k, v in self.tracks.items()}
+
+        if self.exit_energies is not None:
+            d["exit_energies"] = [float(e) for e in self.exit_energies]
+        
+        # Обработка particle_results
+        if self.particle_results is not None:
+            d["particle_results"] = {
+                key: value.to_dict() for key, value in self.particle_results.items()
+            }
+
+        if self.energy_profiles is not None:
+            energy_profiles_json = {}
+            for key, profile in self.energy_profiles.items():
+                # Ключ: строка вместо кортежа
+                str_key = f"{key[0]}_{key[1]}" if isinstance(key, tuple) else str(key)
+                
+                # Преобразуем кортежи в списках points
+                points_serializable = [
+                    list(point) if isinstance(point, tuple) else point 
+                    for point in profile.get("points", [])
+                ]
+                
+                energy_profiles_json[str_key] = {
+                    "parent_id": profile.get("parent_id", 0),
+                    "particle": profile.get("particle", "unknown"),
+                    "points": points_serializable,  # [[z, E], [z, E], ...]
+                    "n_points": len(points_serializable),
+                    "energy_start": points_serializable[0][1] if points_serializable else None,
+                    "energy_end": points_serializable[-1][1] if points_serializable else None,
+                    "energy_loss": (points_serializable[0][1] - points_serializable[-1][1]) 
+                                   if len(points_serializable) >= 2 else None,
+                    "z_start": points_serializable[0][0] if points_serializable else None,
+                    "z_end": points_serializable[-1][0] if points_serializable else None,
+                    "is_stopped": points_serializable[-1][1] < 0.001 if points_serializable else False
+                }
+            d["energy_profiles"] = energy_profiles_json
+        
+        # if self.exit_energies is not None:
+        #     d["exit_energies"] = {
+        #         "values": self.exit_energies,
+        #         "count": len(self.exit_energies),
+        #         "min": min(self.exit_energies) if self.exit_energies else None,
+        #         "max": max(self.exit_energies) if self.exit_energies else None,
+        #         "mean": sum(self.exit_energies) / len(self.exit_energies),
+        #         "std": (sum((e - sum(self.exit_energies)/len(self.exit_energies))**2 
+        #                for e in self.exit_energies) / len(self.exit_energies))**0.5 
+        #                if len(self.exit_energies) > 1 else None
+        #     }
+        
+        if self.energy_summary is not None:
+            d["energy_summary"] = self.energy_summary
         
         # Обработка particle_results
         if self.particle_results is not None:

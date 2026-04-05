@@ -518,6 +518,12 @@ class SingleProcessSimulationRunner:
         if cfg.use_mixed_beam and len(cfg.particles) > 1:
             mixed_result = self._analyze_mixed_beam_results(tracks, cfg.events, cfg.particles)
         logging.info(f"simulation result screen info: {screen_info}")
+        logging.info(f"simulation tracks: {tracks.exit_energies}")
+        logging.info(f"sum energy {sum(tracks.exit_energies) / len(tracks.exit_energies)}")
+
+        energy_summary = _compute_energy_summary(tracks, layout)
+        logging.info(f'energy summary: {energy_summary}')
+
         result = SimulationResult(
             screen_info=screen_info,
             total_particles=cfg.events,
@@ -526,8 +532,9 @@ class SingleProcessSimulationRunner:
             tracks=tracks.data if cfg.collect_tracks else None,
             mixed_beam_result=mixed_result,
             energy_profiles=tracks.energy_profiles,
-            exit_energies=tracks.exit_energies
-        )
+            exit_energies=tracks.exit_energies,
+            energy_summary=energy_summary
+    )
 
         # result.energy_profiles = tracks.energy_profiles
         # result.exit_energies = tracks.exit_energies
@@ -565,6 +572,82 @@ class SingleProcessSimulationRunner:
         }
         
         return stats
+    
+def _compute_energy_summary(tracks: TrackCollector, layout: dict) -> dict:
+        """Вычисляет сводную статистику по энергии"""
+        logging.info(f'track energy profiles: {tracks.energy_profiles}')
+        if not tracks.energy_profiles:
+            logging.info(f'not')
+            return {}
+        
+        first_z = layout.get("first_screen_front_z_mm", 0)
+        screen_thickness = layout.get("screens_end_z_mm", 0) - first_z
+        
+        # Статистика по первичным частицам
+        primary_profiles = [
+            p for p in tracks.energy_profiles.values() 
+            if p.get("parent_id", 0) == 0
+        ]
+        logging.info(f'primary: {primary_profiles}')
+        # Статистика по вторичным частицам
+        secondary_profiles = [
+            p for p in tracks.energy_profiles.values() 
+            if p.get("parent_id", 0) != 0
+        ]
+        
+        # Подсчёт остановившихся частиц
+        stopped_primary = 0
+        stopped_secondary = 0
+        energy_loss_primary = []
+        energy_loss_secondary = []
+        
+        for profile in primary_profiles:
+            points = profile.get("points", [])
+            if len(points) >= 2:
+                e_start = points[0][1]
+                e_end = points[-1][1]
+                if e_end < 0.001:  # Остановилась
+                    stopped_primary += 1
+                energy_loss_primary.append(e_start - e_end)
+        
+        for profile in secondary_profiles:
+            points = profile.get("points", [])
+            if len(points) >= 2:
+                e_start = points[0][1]
+                e_end = points[-1][1]
+                if e_end < 0.001:  # Остановилась
+                    stopped_secondary += 1
+                energy_loss_secondary.append(e_start - e_end)
+        
+        return {
+            "primary_particles": {
+                "total": len(primary_profiles),
+                "stopped_in_screen": stopped_primary,
+                "exited_screen": len(primary_profiles) - stopped_primary,
+                "stopping_fraction": stopped_primary / len(primary_profiles) if primary_profiles else 0,
+                "avg_energy_loss": sum(energy_loss_primary) / len(energy_loss_primary) if energy_loss_primary else 0,
+                "max_energy_loss": max(energy_loss_primary) if energy_loss_primary else 0,
+                "min_energy_loss": min(energy_loss_primary) if energy_loss_primary else 0
+            },
+            "secondary_particles": {
+                "total": len(secondary_profiles),
+                "stopped_in_screen": stopped_secondary,
+                "exited_screen": len(secondary_profiles) - stopped_secondary,
+                "stopping_fraction": stopped_secondary / len(secondary_profiles) if secondary_profiles else 0,
+                "avg_energy_loss": sum(energy_loss_secondary) / len(energy_loss_secondary) if energy_loss_secondary else 0
+            },
+            "screen": {
+                "thickness_mm": screen_thickness,
+                "first_z_mm": first_z,
+                "end_z_mm": layout.get("screens_end_z_mm", 0)
+            },
+            "exit_energies": {
+                "count": len(tracks.exit_energies),
+                "min": min(tracks.exit_energies) if tracks.exit_energies else None,
+                "max": max(tracks.exit_energies) if tracks.exit_energies else None,
+                "mean": sum(tracks.exit_energies) / len(tracks.exit_energies) if tracks.exit_energies else None
+            }
+        }
 
 # -----------------------------
 # Запуск симуляции
@@ -581,6 +664,7 @@ class SimulationRunner:
         all_energy_profiles = {}
         all_exit_energies = []
         all_screen_info = None
+        all_energy_summary = {}
 
         logging.info(f"simulation config: {cfg}")
         # Создаем конфиги для каждой частицы
@@ -652,7 +736,12 @@ class SimulationRunner:
                     logging.info(f"all energy profiles: {all_energy_profiles}")
 
                     if "exit_energies" in result_dict and result_dict["exit_energies"]:
+                        logging.info(f'ex: {result_dict["exit_energies"]}')
                         all_exit_energies.extend(result_dict["exit_energies"])
+
+                    if "energy_summary" in result_dict and result_dict["energy_summary"]:
+                        logging.info(f'energy_summary: {result_dict["energy_summary"]}')
+
 
                     if all_screen_info is None and result_dict.get("screen_info"):
                         all_screen_info = result_dict["screen_info"]
@@ -672,8 +761,10 @@ class SimulationRunner:
                     particle_results[key] = result
 
         # Создаем сравнительный отчет
+        logging.info(f'partivle results :{particle_results}')
         comparison = self._create_comparison(particle_results)
-        
+        logging.info(f'all_exit_energies: {all_exit_energies}')
+
         sim_res = SimulationResult(
             particle_results=particle_results,
             comparison=comparison,
@@ -681,7 +772,8 @@ class SimulationRunner:
             total_out_primary_particles=result_dict["total_out_primary_particles"],
             total_out_secondary_particles=result_dict["total_out_secondary_particles"],
             energy_profiles=all_energy_profiles,
-            exit_energies=all_exit_energies
+            exit_energies=all_exit_energies,
+            energy_summary=all_energy_summary
         )
         logging.info(f"final simulation results: {sim_res}")
         return sim_res
@@ -745,10 +837,6 @@ def export_to_html(plotter, filename="visualization.html"):
         print(f"Ошибка при экспорте в HTML: {e}")
         # Альтернативный способ через сохранение и встраивание
         plotter.show(screenshot=filename.replace('.html', '.png'))
-
-def run_simulation(cfg: SimulationConfig) -> SimulationResult:
-    runner = SimulationRunner()
-    return runner.run(cfg)
 
 # Обновите основную часть кода в конце файла:
 
@@ -826,6 +914,8 @@ if __name__ == "__main__":
     runner = SimulationRunner()
     result = runner.run(cfg_multi)
     logging.info(f"print results")
+    logging.info(f'result object: {result}')
+    logging.info(f'exit energies: {result.exit_energies}')
     logging.info(json.dumps(result.to_dict(), indent=2, ensure_ascii=False))
     print(json.dumps(result.to_dict(), indent=2, ensure_ascii=False))
 
