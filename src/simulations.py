@@ -2,6 +2,8 @@ from __future__ import annotations
 from dataclasses import dataclass, asdict, field
 from typing import Dict, List, Tuple, Optional, Any
 
+from pydantic import BaseModel
+
 # -----------------------------
 # Конфиги и результаты
 # -----------------------------
@@ -10,6 +12,27 @@ class ParticleConfig:
     name: str
     energy_mev: float
     weight: float = 1.0  # Для смешанного пучка
+
+@dataclass
+class SimulationGigaConfig:
+    prompt: str = "Помоги составить экран"
+    input_data: Optional[dict] = None
+    particle: str = "He3"
+    energy_mev: float = 40.0
+    events: int = 10
+    world_xy_mm: float = 500.0
+    world_z_mm: float = 500.0
+    screen_xy_mm: float = 250.0
+    first_screen_z_mm: float = 15.0
+    collect_tracks: bool = False
+    visualize: bool = False
+
+class SimulationGigaRequest(BaseModel):
+    particle: str = "He3"
+    energy_mev: float = 40.0
+    events: int = 100
+    collect_tracks: bool = False
+    prompt: str
 
 @dataclass
 class SimulationConfig:

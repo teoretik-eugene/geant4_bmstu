@@ -17,3 +17,5 @@ test*.json
 Dockerfile.txt
 app.log
 main.txt
+txts
+old

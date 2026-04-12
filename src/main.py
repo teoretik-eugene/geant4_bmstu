@@ -2,7 +2,9 @@ from __future__ import annotations
 from dataclasses import dataclass, asdict, field
 from typing import Dict, List, Tuple, Optional, Any
 import json
+from dotenv import load_dotenv
 import geant4_pybind as g4
+from langchain_gigachat.chat_models import GigaChat
 from DataServer import DataServer
 from TrimParser import TrimParser
 import atexit
@@ -12,7 +14,8 @@ import datetime
 import random
 import multiprocessing as mp
 from concurrent.futures import ProcessPoolExecutor, as_completed
-from simulations import ParticleConfig, SimulationConfig, SingleParticleResult, SimulationResult
+from simulations import ParticleConfig, SimulationConfig, SingleParticleResult, SimulationResult, SimulationGigaConfig
+from giga_tools import ScreenInfo
 from utils import compute_layout, is_primary
 from vis_graph import plot_energy_analysis, get_particle_color, visualize_multi_particle_results, visualize_single_particle_results
 
@@ -459,6 +462,44 @@ def run_single_simulation_in_process(config_dict: dict) -> dict:
     
     return result_dict
 
+def convert_screen_info_to_data(screen: ScreenInfo) -> dict:
+    return {
+        "Screen": screen.to_dict()
+    }
+
+def run_simulation_with_giga(cfg: SimulationGigaConfig):
+    logging.info('run simulation with giga main')
+    load_dotenv()
+    GIGACHAT_CREDENTIALS = os.getenv('GIGACHAT_CREDENTIALS')
+
+    llm = GigaChat(
+        model="GigaChat-2-Max",
+        credentials=GIGACHAT_CREDENTIALS,
+        scope="GIGACHAT_API_PERS",
+        top_p=0, 
+        timeout=120, 
+        ca_bundle_file='russian_trusted_root_ca_pem.crt'
+    )
+
+    structed_llm = llm.with_structured_output(ScreenInfo)
+    logging.info('request for llm')
+    result = structed_llm.invoke(cfg.prompt)
+    logging.info(result)
+
+    data = convert_screen_info_to_data(result)
+    logging.info(f'data: {data}')
+
+    run_config = SimulationConfig(input_data=data, 
+                                  particle=cfg.particle, 
+                                  energy_mev=cfg.energy_mev,
+                                  events=cfg.events)
+    
+    runner = SimulationRunner()
+    res = runner.run(run_config)
+    print(json.dumps(res.to_dict(), indent=2, ensure_ascii=False))
+
+    return res
+
 class SingleProcessSimulationRunner:
     """Runner для одного процесса (без многократного создания RunManager)"""
     
@@ -519,7 +560,7 @@ class SingleProcessSimulationRunner:
             mixed_result = self._analyze_mixed_beam_results(tracks, cfg.events, cfg.particles)
         logging.info(f"simulation result screen info: {screen_info}")
         logging.info(f"simulation tracks: {tracks.exit_energies}")
-        logging.info(f"sum energy {sum(tracks.exit_energies) / len(tracks.exit_energies)}")
+        # logging.info(f"sum energy {sum(tracks.exit_energies) / len(tracks.exit_energies)}")
 
         energy_summary = _compute_energy_summary(tracks.energy_profiles, tracks.exit_energies, layout)
         logging.info(f'energy summary: {energy_summary}')
@@ -867,46 +908,47 @@ if __name__ == "__main__":
     task_id = 103
     
     # Использовать подготовленные данные, сгенерированные LLM
-    data = {
+    data = \
+    {
         "Screen": {
-            "Name": "Экран из Al и ВТ5Л",
-            "Description": "Экран состоит из двух слоев: Al и ВТ5Л. Первый слой толщиной 1000 мкм, второй слой толщиной 2000 мкм. В первом слое материал Be (Бериллий), во втором слое материал ВТ5Л (Титановый сплав ВТ5Л). В слое ВТ5Л содержится 90% Ti (Титан) и 10% Al (Алюминий).",
+            "Name": "Экран из слоев Be и ВК8",
+            "Description": "Экран состоит из двух слоев: бериллий и сплав ВК8. Первый слой - бериллий толщиной 1000 мкм, второй слой - сплав ВК8 толщиной 2000 мкм.",
             "Materials": [
                 {
-                    "Name": "Al",
-                    "Description": "Алюминий (Al) толщиной 1000 мкм",
+                    "Name": "Бериллий",
+                    "Description": "Бериллий толщиной 1000 мкм",
                     "Width": 1000.0,
                     "Elements": [
                         {
-                            "Name": "Алюминий",
-                            "Symbol": "Al",
-                            "Atomic_number": 13,
-                            "Standard_atomic_weight": 26.98,
-                            "Density": 2.7,
+                            "Name": "Бериллий",
+                            "Symbol": "Be",
+                            "Atomic_number": 4,
+                            "Standard_atomic_weight": 9.012,
+                            "Density": 1.85,
                             "Percentage": 100.0
                         }
                     ]
                 },
                 {
-                    "Name": "ВТ5Л",
-                    "Description": "Титановый сплав ВТ5Л толщиной 2000 мкм. Состоит из 90% Ti (Титан) и 10% Al (Алюминий).",
-                    "Width": 2000.0,
+                    "Name": "ВК8",
+                    "Description": "Сплав ВК8 толщиной 2000 мкм. Сплав ВК8 состоит из вольфрама (W) и кобальта (Co). Вольфрам составляет 92% сплава, кобальт - 8%. Плотность вольфрама - 19.3 г/см³, плотность кобальта - 8.9 г/см³. Стандартный атомный вес вольфрама - 183.84, атомный номер - 74. Стандартный атомный вес кобальта - 58.93, атомный номер - 27.",
+                    "Width": 5000.0,
                     "Elements": [
                         {
-                            "Name": "Титан",
-                            "Symbol": "Ti",
-                            "Atomic_number": 22,
-                            "Standard_atomic_weight": 47.867,
-                            "Density": 4.51,
-                            "Percentage": 90.0
+                            "Name": "Вольфрам",
+                            "Symbol": "W",
+                            "Atomic_number": 74,
+                            "Standard_atomic_weight": 183.84,
+                            "Density": 19.3,
+                            "Percentage": 92.0
                         },
                         {
-                            "Name": "Алюминий",
-                            "Symbol": "Al",
-                            "Atomic_number": 13,
-                            "Standard_atomic_weight": 26.982,
-                            "Density": 2.7,
-                            "Percentage": 10.0
+                            "Name": "Кобальт",
+                            "Symbol": "Co",
+                            "Atomic_number": 27,
+                            "Standard_atomic_weight": 58.93,
+                            "Density": 8.9,
+                            "Percentage": 8.0
                         }
                     ]
                 }
@@ -923,9 +965,9 @@ if __name__ == "__main__":
         task_id=task_id,
         input_data=data,
         particles=[
-            # ParticleConfig(name="He3", energy_mev=40.0),
-            ParticleConfig(name="proton", energy_mev=60.0),
-            ParticleConfig(name="e-", energy_mev=60.0)
+            ParticleConfig(name="He3", energy_mev=40.0),
+            ParticleConfig(name="proton", energy_mev=60.0)
+            # ParticleConfig(name="e-", energy_mev=60.0)
         ],
         events=30,
         collect_tracks=True,

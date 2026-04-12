@@ -80,13 +80,14 @@ def run_simulation_process(simulation_id: str, config_dict: dict, result_dir: st
 import json
 import sys
 sys.path.insert(0, ".")
-from main import run_simulation, SimulationConfig
+from main import SimulationRunner, SimulationConfig
 
 with open("{config_file}", "r") as f:
     config_dict = json.load(f)
 
 cfg = SimulationConfig(**config_dict)
-result = run_simulation(cfg)
+runner = SimulationRunner()
+result = runner.run(cfg)
 
 with open("{result_file}", "w") as f:
     json.dump(result.to_dict(), f, indent=2)
@@ -172,7 +173,7 @@ def run_simulation_with_giga(simulation_id: str, config_dict: dict, result_dir: 
 import json
 import sys
 sys.path.insert(0, ".")
-from main import run_simulation, SimulationConfig, run_simulation_with_giga, SimulationGigaConfig
+from main import SimulationRunner, SimulationConfig, run_simulation_with_giga, SimulationGigaConfig
 
 with open("{config_file}", "r") as f:
     config_dict = json.load(f)

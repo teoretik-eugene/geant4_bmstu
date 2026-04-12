@@ -1,5 +1,6 @@
 from langchain_gigachat.chat_models import GigaChat
-from main import run_simulation_with_giga, SimulationConfig, SimulationGigaConfig
+from main import SimulationConfig, run_simulation_with_giga
+from simulations import SimulationConfig, SimulationGigaConfig
 import os
 
 prompt = '''
@@ -20,8 +21,14 @@ prompt3 = '''
 Укажи правильные символы элементов, атомный номер, стандартный атомный вес элементов, плотность.
 '''
 
+prompt4 = '''
+Помоги подготовить информацию для экрана. Помоги составить экран из слоев Be и сплава ВК8. 
+Первый слой толщиной 1000 мкм, а второй 5000 мкм. Найди необходимые данные. 
+Укажи правильные символы элементов, атомный номер, стандартный атомный вес элементов, плотность.
+'''
 
-cfg = SimulationGigaConfig(particle="He3", energy_mev=60, events=20, prompt=prompt3)
+
+cfg = SimulationGigaConfig(particle="He3", energy_mev=60, events=20, prompt=prompt4)
 
 result = run_simulation_with_giga(cfg=cfg)
 

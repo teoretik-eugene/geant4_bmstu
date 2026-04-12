@@ -106,12 +106,12 @@ def plot_energy_analysis(result: SimulationResult, cfg: SimulationConfig, data: 
                 plt.plot(zf, Ef, color="red", alpha=0.3, linewidth=1, label="Secondary" 
                          if track_key == list(result.energy_profiles.keys())[0] else "")
 
-        plt.xlabel("Depth relative to screen start (mm)")
+        plt.xlabel("Depth relative to shield start (mm)")
         plt.ylabel("Energy (MeV)")
         plt.title("Energy vs Depth")
         plt.grid(True, alpha=0.3)
-        plt.axvline(0, linestyle="--", color="green", linewidth=1.5, label="Screen start")
-        plt.axvline(screen_thickness, linestyle="--", color="orange", linewidth=1.5, label="Screen end")
+        plt.axvline(0, linestyle="--", color="green", linewidth=1.5, label="Shield start")
+        plt.axvline(screen_thickness, linestyle="--", color="orange", linewidth=1.5, label="Shield end")
         plt.legend(loc="best")
         plt.xlim(-10, screen_thickness + 20)
         

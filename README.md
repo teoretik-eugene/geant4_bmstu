@@ -15,3 +15,5 @@
 
 Пример ИИ агента - `giga_geant.py`
 - Перед запуском ИИ агента с использованием GigaChat LLM необходимо скачать сертификаты НУЦ Минцифры и поместить в папку `src/`. Документация: https://developers.sber.ru/docs/ru/gigachat/certificates
+
+ docker build -t geant4-dev .
