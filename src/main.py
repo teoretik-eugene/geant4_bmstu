@@ -183,11 +183,17 @@ class ScreenSensitiveDetector(g4.G4VSensitiveDetector):
     def __init__(self, name, screen_info):
         super().__init__(name)
         self.screen_info = screen_info
-        self.stopped_tracks = set()
+        self.stopped_tracks = set()  # Хранит (event_id, track_id)
 
     def ProcessHits(self, aStep: g4.G4Step, _hist):
-        track = aStep.GetTrack()
+        track: g4.G4Track = aStep.GetTrack()
         track_id = track.GetTrackID()
+        # Получаем event_id из G4EventManager
+        try:
+            event_mgr = g4.G4EventManager.GetEventManager()
+            event_id = event_mgr.GetConstCurrentEvent().GetEventID() if event_mgr else None
+        except Exception:
+            event_id = None
 
         kin_energy = track.GetKineticEnergy() / g4.MeV
 
@@ -202,7 +208,7 @@ class ScreenSensitiveDetector(g4.G4VSensitiveDetector):
         vol_name = track.GetVolume().GetName() if track.GetVolume() else ""
 
         is_stopped = False
-        
+
         # Кинетическая энергия близка к 0 (с порогом)
         if kin_energy < 1e-6:  # 1 эВ порог
             is_stopped = True
@@ -210,22 +216,24 @@ class ScreenSensitiveDetector(g4.G4VSensitiveDetector):
         if track_status == g4.fStopAndKill or track_status == g4.fStopButAlive:
             is_stopped = True
 
-        if is_stopped and track_id not in self.stopped_tracks:
+        # Используем (event_id, track_id) для уникальной идентификации трека
+        track_key = (event_id, track_id)
+        particle = track.GetDynamicParticle().GetDefinition().GetParticleName()
+        if is_stopped and track_key not in self.stopped_tracks:
             # Проверяем, что внутри экрана
             if "Screen" in vol_name:
                 try:
                     idx = int(str(vol_name).split("_")[-1])
-                    
                     # Добавляем в статистику
                     if track.GetParentID() == 0:
                         self.screen_info["Materials"][idx]["Primary_stuck_count"] += 1
-                        logging.info(f"Primary track {track_id} stopped in {vol_name} at Z={z_mm:.2f} mm")
+                        logging.info(f"Primary track {particle} {track_id} (event {event_id}) stopped in {vol_name} at Z={z_mm:.2f} mm")
                     else:
                         self.screen_info["Materials"][idx]["Secondary_stuck_count"] += 1
-                        logging.info(f"Secondary track {track_id} stopped in {vol_name} at Z={z_mm:.2f} mm")
-                    
+                        logging.info(f"Secondary track {track_id} (event {event_id}) stopped in {vol_name} at Z={z_mm:.2f} mm")
+
                     # Помечаем трек как обработанный
-                    self.stopped_tracks.add(track_id)
+                    self.stopped_tracks.add(track_key)
                     
                 except Exception as e:
                     logging.error(f"Error processing stopped track: {e}")
@@ -565,6 +573,21 @@ class SingleProcessSimulationRunner:
         energy_summary = _compute_energy_summary(tracks.energy_profiles, tracks.exit_energies, layout)
         logging.info(f'energy summary: {energy_summary}')
 
+        # Обновляем screen_info корректными данными из energy_summary
+        # (ScreenSensitiveDetector ненадёжен для вторичных частиц)
+        if "Materials" in screen_info:
+            stopped_by_mat = energy_summary.get("primary_particles", {}).get("stopped_by_material", {})
+            for mat_idx, count in stopped_by_mat.items():
+                if mat_idx < len(screen_info["Materials"]):
+                    screen_info["Materials"][mat_idx]["Primary_stuck_count"] = count
+
+            stopped_sec_by_mat = energy_summary.get("secondary_particles", {}).get("stopped_by_material", {})
+            for mat_idx, count in stopped_sec_by_mat.items():
+                if mat_idx < len(screen_info["Materials"]):
+                    screen_info["Materials"][mat_idx]["Secondary_stuck_count"] = count
+
+        logging.info(f'updated screen info: {screen_info}')
+
         result = SimulationResult(
             screen_info=screen_info,
             total_particles=cfg.events,
@@ -614,14 +637,79 @@ class SingleProcessSimulationRunner:
         
         return stats
     
+def _find_material_index(z_pos_mm: float, first_z: float, thicknesses: list) -> int:
+    """Определяет индекс материала по Z-координате. Возвращает -1 если не найден."""
+    if not thicknesses:
+        return -1
+    end_z = first_z + sum(thicknesses)
+    
+    # Проверяем, попадает ли точка в диапазон экрана
+    z_cursor = first_z
+    for idx, th in enumerate(thicknesses):
+        layer_end = z_cursor + th
+        # Используем <= для обеих границ, чтобы покрыть пограничные случаи
+        if z_cursor <= z_pos_mm <= layer_end:
+            return idx
+        z_cursor = layer_end
+    return -1
+
+def _find_stopped_particle_material(points: list, first_z: float, thicknesses: list) -> int:
+    """Определяет материал, в котором остановилась/застряла частица.
+    
+    Для частиц, остановившихся ВНУТРИ экрана — по последней Z.
+    Для частиц, остановившихся ДО экрана (обратное рассеяние) — по первой точке внутри экрана.
+    Для частиц, остановившихся ПОСЛЕ экрана — по последней точке внутри экрана.
+    """
+    if not thicknesses or not points:
+        return -1
+    
+    end_z = first_z + sum(thicknesses)
+    z_last = float(points[-1][0])
+    
+    # 1. Частица остановилась ВНУТРИ экрана — используем последнюю Z
+    mat_idx = _find_material_index(z_last, first_z, thicknesses)
+    if mat_idx >= 0:
+        return mat_idx
+    
+    # 2. Частица остановилась ДО экрана (z_last < first_z) — обратное рассеяние
+    #    Ищем первую точку внутри экрана (ближе к месту рождения)
+    if z_last < first_z:
+        for z, e in points:
+            z_float = float(z)
+            mat_idx = _find_material_index(z_float, first_z, thicknesses)
+            if mat_idx >= 0:
+                return mat_idx
+        return -1  # Вся траектория вне экрана
+    
+    # 3. Частица остановилась ПОСЛЕ экрана (z_last > end_z) — пролетела экран
+    #    Ищем последнюю точку внутри экрана
+    if z_last > end_z:
+        for z, e in reversed(points):
+            z_float = float(z)
+            mat_idx = _find_material_index(z_float, first_z, thicknesses)
+            if mat_idx >= 0:
+                return mat_idx
+        return -1
+    
+    return -1
+
 def _compute_energy_summary(energy_profiles: dict, exit_energies: list, layout: dict) -> dict:
-        """Вычисляет сводную статистику по энергии"""
+        """Вычисляет сводную статистику по энергии.
+        
+        Ключевые определения:
+        - exited_screen: частица вышла ЗА ЗАДНЮЮ границу экрана (last_z > screens_end_z_mm)
+        - stopped_in_screen: остановилась ВНУТРИ материала экрана
+        - backscattered: улетела НАЗАД (last_z < first_screen_front_z_mm)
+        - absorbed_before_screen: вторичная частица, остановившаяся ДО экрана (в вакууме)
+        """
         if not energy_profiles:
             return {}
-        
+
         first_z = layout.get("first_screen_front_z_mm", 0)
-        screen_thickness = layout.get("screens_end_z_mm", 0) - first_z
-        
+        end_z = layout.get("screens_end_z_mm", 0)
+        screen_thickness = end_z - first_z
+        thicknesses = layout.get("thicknesses_mm", [])
+
         exit_energies_float = []
         if exit_energies:
             for e in exit_energies:
@@ -629,53 +717,92 @@ def _compute_energy_summary(energy_profiles: dict, exit_energies: list, layout: 
                     exit_energies_float.append(float(e))
                 except (ValueError, TypeError):
                     logging.warning(f"Invalid energy value: {e}, skipping")
-        
+
         # Статистика по первичным частицам
         primary_profiles = [
-            p for p in energy_profiles.values() 
+            p for p in energy_profiles.values()
             if p.get("parent_id", 0) == 0
         ]
-        
+
         # Статистика по вторичным частицам
         secondary_profiles = [
-            p for p in energy_profiles.values() 
+            p for p in energy_profiles.values()
             if p.get("parent_id", 0) != 0
         ]
-        
+
+        # Первичные
         stopped_primary = 0
-        stopped_secondary = 0
+        exited_primary = 0
+        backscattered_primary = 0
         energy_loss_primary = []
+        stopped_primary_by_material = {}
+
+        # Вторичные
+        stopped_secondary = 0
+        exited_secondary = 0
+        backscattered_secondary = 0
+        absorbed_before_secondary = 0
         energy_loss_secondary = []
-        
+        stopped_secondary_by_material = {}
+
         for profile in primary_profiles:
             points = profile.get("points", [])
             if len(points) >= 2:
                 try:
                     e_start = float(points[0][1])
                     e_end = float(points[-1][1])
-                    if e_end < 0.001:
-                        stopped_primary += 1
+                    z_last = float(points[-1][0])
                     energy_loss_primary.append(e_start - e_end)
+
+                    # 1. Вышла за экран (Z > end_z)
+                    if z_last > end_z:
+                        exited_primary += 1
+                    # 2. Улетела назад (Z < first_z)
+                    elif z_last < first_z:
+                        backscattered_primary += 1
+                    # 3. Остановилась ВНУТРИ экрана
+                    elif e_end < 0.001:
+                        stopped_primary += 1
+                        mat_idx = _find_stopped_particle_material(points, first_z, thicknesses)
+                        if mat_idx >= 0:
+                            stopped_primary_by_material[mat_idx] = stopped_primary_by_material.get(mat_idx, 0) + 1
                 except (ValueError, TypeError, IndexError):
                     continue
-        
+
         for profile in secondary_profiles:
             points = profile.get("points", [])
             if len(points) >= 2:
                 try:
                     e_start = float(points[0][1])
                     e_end = float(points[-1][1])
-                    if e_end < 0.001:
-                        stopped_secondary += 1
+                    z_last = float(points[-1][0])
                     energy_loss_secondary.append(e_start - e_end)
+
+                    # 1. Вышла за экран (Z > end_z)
+                    if z_last > end_z:
+                        exited_secondary += 1
+                    # 2. Улетела назад (Z < first_z)
+                    elif z_last < first_z:
+                        backscattered_secondary += 1
+                        # Если остановилась — считаем как absorbed_before
+                        if e_end < 0.001:
+                            absorbed_before_secondary += 1
+                    # 3. Остановилась ВНУТРИ экрана
+                    elif e_end < 0.001:
+                        stopped_secondary += 1
+                        mat_idx = _find_stopped_particle_material(points, first_z, thicknesses)
+                        if mat_idx >= 0:
+                            stopped_secondary_by_material[mat_idx] = stopped_secondary_by_material.get(mat_idx, 0) + 1
                 except (ValueError, TypeError, IndexError):
                     continue
-        
+
         return {
             "primary_particles": {
                 "total": len(primary_profiles),
                 "stopped_in_screen": stopped_primary,
-                "exited_screen": len(primary_profiles) - stopped_primary,
+                "stopped_by_material": stopped_primary_by_material,
+                "exited_screen": exited_primary,
+                "backscattered": backscattered_primary,
                 "stopping_fraction": stopped_primary / len(primary_profiles) if primary_profiles else 0,
                 "avg_energy_loss": sum(energy_loss_primary) / len(energy_loss_primary) if energy_loss_primary else 0,
                 "max_energy_loss": max(energy_loss_primary) if energy_loss_primary else 0,
@@ -684,14 +811,17 @@ def _compute_energy_summary(energy_profiles: dict, exit_energies: list, layout: 
             "secondary_particles": {
                 "total": len(secondary_profiles),
                 "stopped_in_screen": stopped_secondary,
-                "exited_screen": len(secondary_profiles) - stopped_secondary,
+                "stopped_by_material": stopped_secondary_by_material,
+                "exited_screen": exited_secondary,
+                "backscattered": backscattered_secondary,
+                "absorbed_before_screen": absorbed_before_secondary,
                 "stopping_fraction": stopped_secondary / len(secondary_profiles) if secondary_profiles else 0,
                 "avg_energy_loss": sum(energy_loss_secondary) / len(energy_loss_secondary) if energy_loss_secondary else 0
             },
             "screen": {
                 "thickness_mm": screen_thickness,
                 "first_z_mm": first_z,
-                "end_z_mm": layout.get("screens_end_z_mm", 0)
+                "end_z_mm": end_z
             },
             "exit_energies": {
                 "count": len(exit_energies_float),
@@ -793,9 +923,27 @@ class SimulationRunner:
                     if "energy_summary" in result_dict and result_dict["energy_summary"]:
                         logging.info(f'energy_summary: {result_dict["energy_summary"]}')
 
+                    res_screen = result_dict.get("screen_info", {})
+                    res_mats = res_screen.get("Materials", [])
 
-                    if all_screen_info is None and result_dict.get("screen_info"):
-                        all_screen_info = result_dict["screen_info"]
+                    if all_screen_info is None and res_mats:
+                        all_screen_info = {"Materials": []}
+                        for mat in res_mats:
+                            all_screen_info["Materials"].append({
+                                "Name": mat.get("Name", "Unknown"),
+                                "Thickness_mm": mat.get("Thickness_mm", 0),
+                                "Primary_stuck_count": 0,
+                                "Secondary_stuck_count": 0,
+                                "Edep": 0.0
+                            })
+
+                    if all_screen_info.get("Materials"):
+                        for i, mat in enumerate(res_mats):
+                            if i < len(all_screen_info["Materials"]):
+                                target = all_screen_info["Materials"][i]
+                                target["Primary_stuck_count"] += mat.get("Primary_stuck_count", 0)
+                                target["Secondary_stuck_count"] += mat.get("Secondary_stuck_count", 0)
+                                target["Edep"] = target.get("Edep", 0.0) + mat.get("Edep", 0.0)
 
                 except Exception as e:
                     print(f"Failed: {key} - {e}")
@@ -823,6 +971,18 @@ class SimulationRunner:
             layout=layout
         )
         logging.info(f'res emergy summary: {energy_summary}')
+
+        # Обновляем all_screen_info корректными данными из energy_summary
+        if all_screen_info and "Materials" in all_screen_info:
+            stopped_by_mat = energy_summary.get("primary_particles", {}).get("stopped_by_material", {})
+            for mat_idx, count in stopped_by_mat.items():
+                if mat_idx < len(all_screen_info["Materials"]):
+                    all_screen_info["Materials"][mat_idx]["Primary_stuck_count"] = count
+
+            stopped_sec_by_mat = energy_summary.get("secondary_particles", {}).get("stopped_by_material", {})
+            for mat_idx, count in stopped_sec_by_mat.items():
+                if mat_idx < len(all_screen_info["Materials"]):
+                    all_screen_info["Materials"][mat_idx]["Secondary_stuck_count"] = count
 
         sim_res = SimulationResult(
             particle_results=particle_results,
@@ -911,13 +1071,13 @@ if __name__ == "__main__":
     data = \
     {
         "Screen": {
-            "Name": "Экран из слоев Be и ВК8",
-            "Description": "Экран состоит из двух слоев: бериллий и сплав ВК8. Первый слой - бериллий толщиной 1000 мкм, второй слой - сплав ВК8 толщиной 2000 мкм.",
+            "Name": "Экран из слоев Be, Al и стекла",
+            "Description": "Экран состоит из трех слоев: бериллий (Be), алюминий (Al) и стекло. Каждый слой толщиной 1000 мкм.",
             "Materials": [
                 {
-                    "Name": "Бериллий",
-                    "Description": "Бериллий толщиной 1000 мкм",
-                    "Width": 1000.0,
+                    "Name": "Бериллий (Be)",
+                    "Description": "Бериллий (Be) толщиной 1000 мкм",
+                    "Width": 2700.0,
                     "Elements": [
                         {
                             "Name": "Бериллий",
@@ -930,25 +1090,17 @@ if __name__ == "__main__":
                     ]
                 },
                 {
-                    "Name": "ВК8",
-                    "Description": "Сплав ВК8 толщиной 2000 мкм. Сплав ВК8 состоит из вольфрама (W) и кобальта (Co). Вольфрам составляет 92% сплава, кобальт - 8%. Плотность вольфрама - 19.3 г/см³, плотность кобальта - 8.9 г/см³. Стандартный атомный вес вольфрама - 183.84, атомный номер - 74. Стандартный атомный вес кобальта - 58.93, атомный номер - 27.",
-                    "Width": 5000.0,
+                    "Name": "Алюминий (Al)",
+                    "Description": "Алюминий (Al) толщиной 1000 мкм",
+                    "Width": 1000.0,
                     "Elements": [
                         {
-                            "Name": "Вольфрам",
-                            "Symbol": "W",
-                            "Atomic_number": 74,
-                            "Standard_atomic_weight": 183.84,
-                            "Density": 19.3,
-                            "Percentage": 92.0
-                        },
-                        {
-                            "Name": "Кобальт",
-                            "Symbol": "Co",
-                            "Atomic_number": 27,
-                            "Standard_atomic_weight": 58.93,
-                            "Density": 8.9,
-                            "Percentage": 8.0
+                            "Name": "Алюминий",
+                            "Symbol": "Al",
+                            "Atomic_number": 13,
+                            "Standard_atomic_weight": 26.982,
+                            "Density": 2.7,
+                            "Percentage": 100.0
                         }
                     ]
                 }

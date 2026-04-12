@@ -76,6 +76,13 @@ def plot_energy_analysis(result: SimulationResult, cfg: SimulationConfig, data: 
         if first_z is None:
             first_z = 0
 
+        import matplotlib.colors as mcolors
+        particle_colors = {
+            "he3": "#1f77b4", "alpha": "#0d47a1", "proton": "#d62728", 
+            "neutron": "#7f7f7f", "e-": "#2ca02c", "gamma": "#ff7f0e"
+        }
+        type_counts = {}
+
         for track_key, track_data in result.energy_profiles.items():
             points = track_data["points"]
             if len(points) < 2:
@@ -83,7 +90,6 @@ def plot_energy_analysis(result: SimulationResult, cfg: SimulationConfig, data: 
 
             z_abs = [p[0] for p in points]
             E = [p[1] for p in points]
-
             z_rel = [zi - first_z for zi in z_abs]
 
             # фильтр: внутри экрана + немного после
@@ -96,23 +102,36 @@ def plot_energy_analysis(result: SimulationResult, cfg: SimulationConfig, data: 
                 continue
             
             zf, Ef = zip(*filtered)
+            p_type = track_data.get("particle", "unknown").lower()
+            is_primary = track_data.get("parent_id", 0) == 0
 
-            if track_data["parent_id"] == 0:
-                # первичные
-                plt.plot(zf, Ef, color="blue", alpha=0.6, linewidth=1.5, label="Primary" 
-                         if track_key == list(result.energy_profiles.keys())[0] else "")
-            else:
-                # вторичные
-                plt.plot(zf, Ef, color="red", alpha=0.3, linewidth=1, label="Secondary" 
-                         if track_key == list(result.energy_profiles.keys())[0] else "")
+            base_color = particle_colors.get(p_type, "gray" if not is_primary else "blue")
+            alpha = 0.5 if is_primary else 0.3
+            lw = 1.5 if is_primary else 1.0
 
-        plt.xlabel("Depth relative to shield start (mm)")
+            # Подсчёт для легенды
+            if is_primary:
+                type_counts[p_type] = type_counts.get(p_type, 0) + 1
+                
+            label = f"{p_type.capitalize()} ({type_counts[p_type]})" if is_primary and type_counts[p_type] == 1 else ""
+            
+            plt.plot(zf, Ef, color=base_color, alpha=alpha, linewidth=lw, label=label)
+            
+            # Маркер в точке остановки (последняя точка профиля)
+            if Ef[-1] < 0.01:  # порог "остановки"
+                plt.scatter(zf[-1], Ef[-1], color=base_color, s=15, zorder=5)
+
+        # Формируем аккуратную легенду
+        handles, labels = plt.gca().get_legend_handles_labels()
+        by_label = dict(zip(labels, handles))
+        plt.legend(by_label.values(), by_label.keys(), loc="best", fontsize=8)
+
+        plt.xlabel("Depth relative to screen start (mm)")
         plt.ylabel("Energy (MeV)")
-        plt.title("Energy vs Depth")
+        plt.title("Energy vs Depth (Primary tracks colored by particle type)")
         plt.grid(True, alpha=0.3)
-        plt.axvline(0, linestyle="--", color="green", linewidth=1.5, label="Shield start")
-        plt.axvline(screen_thickness, linestyle="--", color="orange", linewidth=1.5, label="Shield end")
-        plt.legend(loc="best")
+        plt.axvline(0, linestyle="--", color="green", linewidth=1.5, label="Screen start")
+        plt.axvline(screen_thickness, linestyle="--", color="orange", linewidth=1.5, label="Screen end")
         plt.xlim(-10, screen_thickness + 20)
         
         filename = os.path.join(out_dir, "energy_vs_depth.png")
