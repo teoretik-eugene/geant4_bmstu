@@ -126,11 +126,11 @@ def plot_energy_analysis(result: SimulationResult, cfg: SimulationConfig, data: 
         by_label = dict(zip(labels, handles))
         plt.legend(by_label.values(), by_label.keys(), loc="best", fontsize=8)
 
-        plt.xlabel("Depth relative to screen start (mm)")
+        plt.xlabel("Depth relative to shield start (mm)")
         plt.ylabel("Energy (MeV)")
-        plt.title("Energy vs Depth (Primary tracks colored by particle type)")
+        plt.title("Energy vs Depth")
         plt.grid(True, alpha=0.3)
-        plt.axvline(0, linestyle="--", color="green", linewidth=1.5, label="Screen start")
+        plt.axvline(0, linestyle="--", color="green", linewidth=1.5, label="Shield start")
         plt.axvline(screen_thickness, linestyle="--", color="orange", linewidth=1.5, label="Screen end")
         plt.xlim(-10, screen_thickness + 20)
         
@@ -307,7 +307,7 @@ def visualize_single_particle_results(cfg: SimulationConfig, result: SimulationR
             y_length=cfg.screen_xy_mm * 0.6,
             z_length=th
         )
-        plotter.add_mesh(cube, opacity=0.3, color='lightblue', name=f"Screen_{i}")
+        plotter.add_mesh(cube, opacity=0.3, color='lightblue', name=f"Schield_{i}")
         z_cursor += th
 
     # Рисуем источник

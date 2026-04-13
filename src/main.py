@@ -1071,35 +1071,35 @@ if __name__ == "__main__":
     data = \
     {
         "Screen": {
-            "Name": "Экран из слоев Be, Al и стекла",
-            "Description": "Экран состоит из трех слоев: бериллий (Be), алюминий (Al) и стекло. Каждый слой толщиной 1000 мкм.",
+            "Name": "Экран из W и Ti",
+            "Description": "Экран состоит из двух слоев: W и Ti.",
             "Materials": [
                 {
-                    "Name": "Бериллий (Be)",
-                    "Description": "Бериллий (Be) толщиной 1000 мкм",
-                    "Width": 2700.0,
+                    "Name": "Титан",
+                    "Description": "Титан",
+                    "Width": 1500.0,
                     "Elements": [
                         {
-                            "Name": "Бериллий",
-                            "Symbol": "Be",
-                            "Atomic_number": 4,
-                            "Standard_atomic_weight": 9.012,
-                            "Density": 1.85,
+                            "Name": "Титан",
+                            "Symbol": "Ti",
+                            "Atomic_number": 22,
+                            "Standard_atomic_weight": 47.87,
+                            "Density": 4.5,
                             "Percentage": 100.0
                         }
                     ]
                 },
                 {
-                    "Name": "Алюминий (Al)",
-                    "Description": "Алюминий (Al) толщиной 1000 мкм",
-                    "Width": 1000.0,
+                    "Name": "W",
+                    "Description": "Вольфрам (W) толщиной 2000 мкм",
+                    "Width": 2000.0,
                     "Elements": [
                         {
-                            "Name": "Алюминий",
-                            "Symbol": "Al",
-                            "Atomic_number": 13,
-                            "Standard_atomic_weight": 26.982,
-                            "Density": 2.7,
+                            "Name": "Вольфрам",
+                            "Symbol": "W",
+                            "Atomic_number": 74,
+                            "Standard_atomic_weight": 183.84,
+                            "Density": 19.25,
                             "Percentage": 100.0
                         }
                     ]
@@ -1118,6 +1118,7 @@ if __name__ == "__main__":
         input_data=data,
         particles=[
             ParticleConfig(name="He3", energy_mev=40.0),
+            ParticleConfig(name="alpha", energy_mev=50.0),
             ParticleConfig(name="proton", energy_mev=60.0)
             # ParticleConfig(name="e-", energy_mev=60.0)
         ],
@@ -1146,7 +1147,7 @@ if __name__ == "__main__":
         elif result.tracks:
             logging.info(f'visualize_single_particle_results')
             # Визуализация для одиночной частицы
-            visualize_single_particle_results(cfg_multi, result)
+            visualize_single_particle_results(cfg_multi, result, data, export_dir)
         else:
             print("Нет данных для визуализации (треки не собраны)")
 
