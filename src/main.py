@@ -54,8 +54,6 @@ class TrackCollector:
             self._particle_types[(event_id, track_id)] = particle_type
 
     def add_energy(self, event_id, track_id, parent_id, particle_type, z, energy):
-        if not self.enabled:
-            return
         key = (event_id, track_id)
 
         if key not in self._energy_profiles:
@@ -68,8 +66,6 @@ class TrackCollector:
         self._energy_profiles[key]["points"].append((z, energy))
     
     def add_exit_energy(self, energy):
-        if not self.enabled:
-            return
         self._exit_energies.append(energy)
 
     def get_particle_type(self, event_id: int, track_id: int) -> str:
@@ -718,6 +714,40 @@ def _compute_energy_summary(energy_profiles: dict, exit_energies: list, layout: 
                 except (ValueError, TypeError):
                     logging.warning(f"Invalid energy value: {e}, skipping")
 
+        assessment_energy_threshold_mev = 10.0
+        assessment_max_allowed_fraction = 0.1
+        exit_above_threshold_count = sum(
+            1 for energy in exit_energies_float
+            if energy >= assessment_energy_threshold_mev
+        )
+        exit_total_count = len(exit_energies_float)
+        exit_above_threshold_fraction = (
+            exit_above_threshold_count / exit_total_count
+            if exit_total_count > 0 else 0.0
+        )
+        screen_ineffective = exit_above_threshold_fraction > assessment_max_allowed_fraction
+
+        if exit_total_count == 0:
+            assessment_verdict = "effective"
+            assessment_reason = (
+                "Выходное излучение за экраном не зарегистрировано, "
+                "по текущему критерию экран считается эффективным."
+            )
+        elif screen_ineffective:
+            assessment_verdict = "ineffective"
+            assessment_reason = (
+                f"Доля выходных частиц с энергией не ниже {assessment_energy_threshold_mev:.1f} МэВ "
+                f"составляет {exit_above_threshold_fraction * 100:.1f}%, что превышает порог "
+                f"{assessment_max_allowed_fraction * 100:.1f}%."
+            )
+        else:
+            assessment_verdict = "effective"
+            assessment_reason = (
+                f"Доля выходных частиц с энергией не ниже {assessment_energy_threshold_mev:.1f} МэВ "
+                f"составляет {exit_above_threshold_fraction * 100:.1f}%, что не превышает порог "
+                f"{assessment_max_allowed_fraction * 100:.1f}%."
+            )
+
         # Статистика по первичным частицам
         primary_profiles = [
             p for p in energy_profiles.values()
@@ -828,6 +858,20 @@ def _compute_energy_summary(energy_profiles: dict, exit_energies: list, layout: 
                 "min": min(exit_energies_float) if exit_energies_float else None,
                 "max": max(exit_energies_float) if exit_energies_float else None,
                 "mean": sum(exit_energies_float) / len(exit_energies_float) if exit_energies_float else None
+            },
+            "shield_assessment": {
+                "criterion": "exit_radiation_fraction_above_energy_threshold",
+                "threshold_energy_mev": assessment_energy_threshold_mev,
+                "max_allowed_fraction": assessment_max_allowed_fraction,
+                "max_allowed_percent": assessment_max_allowed_fraction * 100,
+                "exit_particles_total": exit_total_count,
+                "exit_particles_above_threshold": exit_above_threshold_count,
+                "fraction_above_threshold": exit_above_threshold_fraction,
+                "percent_above_threshold": exit_above_threshold_fraction * 100,
+                "is_effective": not screen_ineffective,
+                "is_ineffective": screen_ineffective,
+                "verdict": assessment_verdict,
+                "reason": assessment_reason
             }
         }
 # -----------------------------
@@ -1077,7 +1121,7 @@ if __name__ == "__main__":
                 {
                     "Name": "Титан",
                     "Description": "Титан",
-                    "Width": 1500.0,
+                    "Width": 1000.0,
                     "Elements": [
                         {
                             "Name": "Титан",
@@ -1092,7 +1136,7 @@ if __name__ == "__main__":
                 {
                     "Name": "W",
                     "Description": "Вольфрам (W) толщиной 2000 мкм",
-                    "Width": 2000.0,
+                    "Width": 1000.0,
                     "Elements": [
                         {
                             "Name": "Вольфрам",
@@ -1117,9 +1161,9 @@ if __name__ == "__main__":
         task_id=task_id,
         input_data=data,
         particles=[
-            ParticleConfig(name="He3", energy_mev=40.0),
+            ParticleConfig(name="He3", energy_mev=50.0),
             ParticleConfig(name="alpha", energy_mev=50.0),
-            ParticleConfig(name="proton", energy_mev=60.0)
+            ParticleConfig(name="proton", energy_mev=50.0)
             # ParticleConfig(name="e-", energy_mev=60.0)
         ],
         events=30,
