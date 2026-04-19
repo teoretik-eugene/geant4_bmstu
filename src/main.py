@@ -78,7 +78,8 @@ class TrackCollector:
         edep_mev,
         step_length_mm,
         pre_energy_mev,
-        post_energy_mev
+        post_energy_mev,
+        let_mev_cm2_mg=None
     ):
         key = (event_id, track_id)
         if key not in self._electronics_hits:
@@ -91,7 +92,11 @@ class TrackCollector:
                 "track_length_mm": 0.0,
                 "entry_energy_mev": float(pre_energy_mev),
                 "exit_energy_mev": float(post_energy_mev),
-                "steps": 0
+                "steps": 0,
+                "let_sum_weighted": 0.0,
+                "let_samples": 0,
+                "mean_let_mev_cm2_mg": None,
+                "max_let_mev_cm2_mg": None
             }
 
         hit = self._electronics_hits[key]
@@ -99,6 +104,14 @@ class TrackCollector:
         hit["track_length_mm"] += float(step_length_mm)
         hit["exit_energy_mev"] = float(post_energy_mev)
         hit["steps"] += 1
+        if let_mev_cm2_mg is not None:
+            let_value = float(let_mev_cm2_mg)
+            hit["let_sum_weighted"] += let_value * max(float(step_length_mm), 0.0)
+            hit["let_samples"] += 1
+            if hit["track_length_mm"] > 0:
+                hit["mean_let_mev_cm2_mg"] = hit["let_sum_weighted"] / hit["track_length_mm"]
+            current_max = hit.get("max_let_mev_cm2_mg")
+            hit["max_let_mev_cm2_mg"] = let_value if current_max is None else max(current_max, let_value)
 
     def get_particle_type(self, event_id: int, track_id: int) -> str:
         return self._particle_types.get((event_id, track_id), "unknown")
@@ -160,7 +173,7 @@ class ScreenGeometry(g4.G4VUserDetectorConstruction):
         half_world_z_mm = layout["half_world_z_mm"]
         first_screen_front_z_mm = layout["first_screen_front_z_mm"]
         electronics_gap_mm = layout.get("electronics_gap_mm", getattr(self.cfg, "electronics_gap_mm", 0.1))
-        electronics_thickness_mm_parameter = 1
+        electronics_thickness_mm_parameter = 0.05
         electronics_thickness_mm = layout.get("electronics_thickness_mm", getattr(self.cfg, "electronics_thickness_mm", 
                                                                                   electronics_thickness_mm_parameter))
 
@@ -338,6 +351,7 @@ class ElectronicsSensitiveDetector(g4.G4VSensitiveDetector):
         super().__init__(name)
         self.screen_info = screen_info
         self.tracks = tracks
+        self.em_calculator = g4.G4EmCalculator()
 
     def ProcessHits(self, aStep: g4.G4Step, _hist):
         track: g4.G4Track = aStep.GetTrack()
@@ -349,9 +363,47 @@ class ElectronicsSensitiveDetector(g4.G4VSensitiveDetector):
 
         edep_mev = aStep.GetTotalEnergyDeposit() / g4.MeV
         step_length_mm = aStep.GetStepLength() / g4.mm
-        pre_energy_mev = aStep.GetPreStepPoint().GetKineticEnergy() / g4.MeV
-        post_energy_mev = aStep.GetPostStepPoint().GetKineticEnergy() / g4.MeV
-        particle_name = track.GetDefinition().GetParticleName() if track.GetDefinition() else "unknown"
+
+        pre_step = aStep.GetPreStepPoint()
+        post_step = aStep.GetPostStepPoint()
+        pre_energy_mev = pre_step.GetKineticEnergy() / g4.MeV
+        post_energy_mev = post_step.GetKineticEnergy() / g4.MeV
+        particle_def = track.GetDefinition()
+        particle_name = particle_def.GetParticleName() if particle_def else "unknown"
+        material = pre_step.GetMaterial()
+        density_g_cm3 = material.GetDensity() / (g4.g / g4.cm3) if material else 0.0
+
+        if step_length_mm > 1e-4:  # отсечка микрошагов
+            let_step_mev_cm2_mg = (edep_mev / step_length_mm) / (density_g_cm3 * 100.0)
+        else:
+            let_step_mev_cm2_mg = 0.0
+
+        if (
+            particle_def is not None
+            and abs(particle_def.GetPDGCharge()) > 0
+            and material is not None
+            and pre_energy_mev > 0
+            and density_g_cm3 > 0
+        ):
+            try:
+                dedx_internal = self.em_calculator.ComputeElectronicDEDX(
+                    pre_energy_mev * g4.MeV,
+                    particle_def,
+                    material
+                )
+                dedx_mev_per_mm = dedx_internal / (g4.MeV / g4.mm)
+                logging.info(f"dedx_mev_per_mm: {dedx_mev_per_mm}")
+                let_step_mev_cm2_mg = dedx_mev_per_mm / (density_g_cm3 * 100.0)
+                logging.info(f"let_step_mev_cm2_mg: {let_step_mev_cm2_mg}")
+            except Exception as exc:
+                logging.warning(
+                    "G4EmCalculator LET failed for particle=%s, energy=%.6f MeV: %s",
+                    particle_name,
+                    pre_energy_mev,
+                    exc
+                )
+        else:
+            let_step_mev_cm2_mg = None
 
         if edep_mev <= 0 and step_length_mm <= 0:
             return True
@@ -364,7 +416,8 @@ class ElectronicsSensitiveDetector(g4.G4VSensitiveDetector):
             edep_mev=edep_mev,
             step_length_mm=step_length_mm,
             pre_energy_mev=pre_energy_mev,
-            post_energy_mev=post_energy_mev
+            post_energy_mev=post_energy_mev,
+            let_mev_cm2_mg=let_step_mev_cm2_mg
         )
 
         electronics_info: Dict = self.screen_info.setdefault("Electronics", {})
@@ -375,6 +428,11 @@ class ElectronicsSensitiveDetector(g4.G4VSensitiveDetector):
             electronics_info.get("track_length_mm", 0.0) + float(step_length_mm)
         )
         electronics_info["hit_count"] = electronics_info.get("hit_count", 0) + 1
+        if let_step_mev_cm2_mg is not None:
+            electronics_info["let_max_mev_cm2_mg"] = max(
+                electronics_info.get("let_max_mev_cm2_mg", 0.0),
+                float(let_step_mev_cm2_mg)
+            )
         return True
 
 class ScreenEventAction(g4.G4UserEventAction):
@@ -885,12 +943,9 @@ def _compute_electronics_let_summary(
         try:
             track_length_mm = float(hit.get("track_length_mm", 0.0))
             edep_mev = float(hit.get("edep_mev", 0.0))
-            if track_length_mm <= 0 or edep_mev <= 0:
-                continue
-
-            let_mev_per_mm = edep_mev / track_length_mm
-            let_mev_cm2_mg = let_mev_per_mm / (density_g_cm3 * 100.0) if density_g_cm3 > 0 else None
-            if let_mev_cm2_mg is None:
+            mean_let_mev_cm2_mg = hit.get("mean_let_mev_cm2_mg")
+            max_let_mev_cm2_mg = hit.get("max_let_mev_cm2_mg")
+            if mean_let_mev_cm2_mg is None and max_let_mev_cm2_mg is None:
                 continue
 
             valid_hits.append({
@@ -903,24 +958,31 @@ def _compute_electronics_let_summary(
                 "entry_energy_mev": hit.get("entry_energy_mev"),
                 "exit_energy_mev": hit.get("exit_energy_mev"),
                 "steps": hit.get("steps", 0),
-                "let_mev_per_mm": let_mev_per_mm,
-                "let_mev_cm2_mg": let_mev_cm2_mg
+                "mean_let_mev_cm2_mg": float(mean_let_mev_cm2_mg) if mean_let_mev_cm2_mg is not None else None,
+                "max_let_mev_cm2_mg": float(max_let_mev_cm2_mg) if max_let_mev_cm2_mg is not None else None
             })
         except (TypeError, ValueError):
             continue
 
-    let_values = [hit["let_mev_cm2_mg"] for hit in valid_hits]
-    max_hit = max(valid_hits, key=lambda hit: hit["let_mev_cm2_mg"]) if valid_hits else None
+    mean_let_values = [
+        hit["mean_let_mev_cm2_mg"] for hit in valid_hits
+        if hit["mean_let_mev_cm2_mg"] is not None
+    ]
+    max_let_values = [
+        hit["max_let_mev_cm2_mg"] for hit in valid_hits
+        if hit["max_let_mev_cm2_mg"] is not None
+    ]
+    max_hit = max(valid_hits, key=lambda hit: hit.get("max_let_mev_cm2_mg") or 0.0) if valid_hits else None
     above_threshold_count = sum(
-        1 for let_value in let_values
+        1 for let_value in max_let_values
         if let_value >= threshold_mev_cm2_mg
     )
     above_threshold_fraction = (
-        above_threshold_count / len(let_values)
-        if let_values else 0.0
+        above_threshold_count / len(max_let_values)
+        if max_let_values else 0.0
     )
     risk = _classify_let_risk(
-        max_let_mev_cm2_mg=max(let_values) if let_values else None,
+        max_let_mev_cm2_mg=max(max_let_values) if max_let_values else None,
         threshold_mev_cm2_mg=threshold_mev_cm2_mg
     )
 
@@ -931,9 +993,9 @@ def _compute_electronics_let_summary(
         "threshold_mev_cm2_mg": threshold_mev_cm2_mg,
         "hits_total": len(electronics_hits or []),
         "tracks_with_deposition": len(valid_hits),
-        "avg_let_mev_cm2_mg": sum(let_values) / len(let_values) if let_values else None,
-        "max_let_mev_cm2_mg": max(let_values) if let_values else None,
-        "min_let_mev_cm2_mg": min(let_values) if let_values else None,
+        "avg_let_mev_cm2_mg": sum(mean_let_values) / len(mean_let_values) if mean_let_values else None,
+        "max_let_mev_cm2_mg": max(max_let_values) if max_let_values else None,
+        "min_let_mev_cm2_mg": min(mean_let_values) if mean_let_values else None,
         "above_threshold_count": above_threshold_count,
         "above_threshold_fraction": above_threshold_fraction,
         "above_threshold_percent": above_threshold_fraction * 100.0,
@@ -1407,9 +1469,9 @@ if __name__ == "__main__":
             "Description": "Экран состоит из двух слоев: W и Ti.",
             "Materials": [
                 {
-                    "Name": "Титан",
-                    "Description": "Титан",
-                    "Width": 1000.0,
+                    "Name": "Al",
+                    "Description": "Алюминий (Al) толщиной 1000 мкм",
+                    "Width": 2000.0,
                     "Elements": [
                         {
                             "Name": "Титан",
@@ -1424,7 +1486,7 @@ if __name__ == "__main__":
                 {
                     "Name": "W",
                     "Description": "Вольфрам (W) толщиной 2000 мкм",
-                    "Width": 1000.0,
+                    "Width": 2000.0,
                     "Elements": [
                         {
                             "Name": "Вольфрам",
@@ -1449,9 +1511,10 @@ if __name__ == "__main__":
         task_id=task_id,
         input_data=data,
         particles=[
-            ParticleConfig(name="He3", energy_mev=50.0),
-            ParticleConfig(name="alpha", energy_mev=60.0),
-            ParticleConfig(name="proton", energy_mev=60.0)
+            ParticleConfig(name="He3", energy_mev=70.0),
+            ParticleConfig(name="alpha", energy_mev=70.0),
+            ParticleConfig(name="proton", energy_mev=70.0),
+            ParticleConfig(name="neutron", energy_mev=50.0)
             # ParticleConfig(name="e-", energy_mev=60.0)
         ],
         events=30,
