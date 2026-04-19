@@ -45,6 +45,7 @@ class TrackCollector:
         #     "points": [(z, E)]
         # }
         self._exit_energies = []    # энергии на выходе
+        self._electronics_hits: Dict[Tuple[int, int], Dict[str, Any]] = {}
     
     def add(self, event_id: int, track_id: int, pos: g4.G4ThreeVector, particle_type: str = None) -> None:
         if not self.enabled:
@@ -68,6 +69,37 @@ class TrackCollector:
     def add_exit_energy(self, energy):
         self._exit_energies.append(energy)
 
+    def add_electronics_step(
+        self,
+        event_id,
+        track_id,
+        parent_id,
+        particle_type,
+        edep_mev,
+        step_length_mm,
+        pre_energy_mev,
+        post_energy_mev
+    ):
+        key = (event_id, track_id)
+        if key not in self._electronics_hits:
+            self._electronics_hits[key] = {
+                "event_id": event_id,
+                "track_id": track_id,
+                "parent_id": parent_id,
+                "particle": particle_type,
+                "edep_mev": 0.0,
+                "track_length_mm": 0.0,
+                "entry_energy_mev": float(pre_energy_mev),
+                "exit_energy_mev": float(post_energy_mev),
+                "steps": 0
+            }
+
+        hit = self._electronics_hits[key]
+        hit["edep_mev"] += float(edep_mev)
+        hit["track_length_mm"] += float(step_length_mm)
+        hit["exit_energy_mev"] = float(post_energy_mev)
+        hit["steps"] += 1
+
     def get_particle_type(self, event_id: int, track_id: int) -> str:
         return self._particle_types.get((event_id, track_id), "unknown")
     
@@ -88,6 +120,10 @@ class TrackCollector:
         return self._exit_energies
 
     @property
+    def electronics_hits(self):
+        return list(self._electronics_hits.values())
+
+    @property
     def data(self):
         return self._data
 
@@ -99,13 +135,15 @@ class TrackCollector:
 # Геометрия
 # -----------------------------
 class ScreenGeometry(g4.G4VUserDetectorConstruction):
-    def __init__(self, data: dict, screen_info: Dict[str, Any], cfg: SimulationConfig) -> None:
+    def __init__(self, data: dict, screen_info: Dict[str, Any], cfg: SimulationConfig, tracks: Optional[TrackCollector] = None) -> None:
         super().__init__()
         self.tp = TrimParser(data)
         self.screen_info = screen_info
         self.cfg = cfg
+        self.tracks = tracks
         self.logic_world = None
         self.screen_logicals = []
+        self.electronics_logical = None
         self.screens_end_z_mm = cfg.first_screen_z_mm
         self._precomputed_layout: Optional[dict] = None
 
@@ -121,6 +159,10 @@ class ScreenGeometry(g4.G4VUserDetectorConstruction):
         world_z_mm_local = layout["world_z_mm_local"]
         half_world_z_mm = layout["half_world_z_mm"]
         first_screen_front_z_mm = layout["first_screen_front_z_mm"]
+        electronics_gap_mm = layout.get("electronics_gap_mm", getattr(self.cfg, "electronics_gap_mm", 0.1))
+        electronics_thickness_mm_parameter = 1
+        electronics_thickness_mm = layout.get("electronics_thickness_mm", getattr(self.cfg, "electronics_thickness_mm", 
+                                                                                  electronics_thickness_mm_parameter))
 
         for mat, thickness_mm in zip(materials, thicknesses_mm):
             mat_name = str(mat.get("Name"))
@@ -162,6 +204,42 @@ class ScreenGeometry(g4.G4VUserDetectorConstruction):
             self.screen_logicals.append(logical)
             z_cursor += thickness
         self.screens_end_z_mm = first_screen_front_z_mm + total_thickness_mm
+
+        if electronics_thickness_mm > 0:
+            electronics_material_name = getattr(self.cfg, "electronics_material", "G4_Si")
+            electronics_material = nist.FindOrBuildMaterial(electronics_material_name)
+            electronics_center_z = (
+                self.screens_end_z_mm + electronics_gap_mm + 0.5 * electronics_thickness_mm
+            ) * g4.mm
+            electronics_solid = g4.G4Box(
+                "Electronics",
+                0.5 * screen_xy,
+                0.5 * screen_xy,
+                0.5 * electronics_thickness_mm * g4.mm
+            )
+            self.electronics_logical = g4.G4LogicalVolume(
+                electronics_solid,
+                electronics_material,
+                "Electronics"
+            )
+            g4.G4PVPlacement(
+                None,
+                g4.G4ThreeVector(0, 0, electronics_center_z),
+                self.electronics_logical,
+                "Electronics",
+                self.logic_world,
+                False,
+                0,
+                check_overlaps
+            )
+            self.screen_info["Electronics"] = {
+                "material": electronics_material_name,
+                "density_g_cm3": electronics_material.GetDensity() / (g4.g / g4.cm3),
+                "gap_mm": electronics_gap_mm,
+                "thickness_mm": electronics_thickness_mm,
+                "z_start_mm": self.screens_end_z_mm + electronics_gap_mm,
+                "z_end_mm": self.screens_end_z_mm + electronics_gap_mm + electronics_thickness_mm
+            }
         return phys_world
 
     def ConstructSDandField(self):
@@ -170,6 +248,14 @@ class ScreenGeometry(g4.G4VUserDetectorConstruction):
             sd = ScreenSensitiveDetector(f"ScreenDetector_{idx}", self.screen_info)
             sdm.AddNewDetector(sd)
             sc_log.SetSensitiveDetector(sd)
+        if self.electronics_logical is not None and self.tracks is not None:
+            electronics_sd = ElectronicsSensitiveDetector(
+                "ElectronicsDetector",
+                self.screen_info,
+                self.tracks
+            )
+            sdm.AddNewDetector(electronics_sd)
+            self.electronics_logical.SetSensitiveDetector(electronics_sd)
 
 # -----------------------------
 # Сенсоры
@@ -246,6 +332,51 @@ class ScreenSensitiveDetector(g4.G4VSensitiveDetector):
 
         return True
 
+
+class ElectronicsSensitiveDetector(g4.G4VSensitiveDetector):
+    def __init__(self, name, screen_info, tracks: TrackCollector):
+        super().__init__(name)
+        self.screen_info = screen_info
+        self.tracks = tracks
+
+    def ProcessHits(self, aStep: g4.G4Step, _hist):
+        track: g4.G4Track = aStep.GetTrack()
+        try:
+            event_mgr = g4.G4EventManager.GetEventManager()
+            event_id = event_mgr.GetConstCurrentEvent().GetEventID() if event_mgr else None
+        except Exception:
+            event_id = None
+
+        edep_mev = aStep.GetTotalEnergyDeposit() / g4.MeV
+        step_length_mm = aStep.GetStepLength() / g4.mm
+        pre_energy_mev = aStep.GetPreStepPoint().GetKineticEnergy() / g4.MeV
+        post_energy_mev = aStep.GetPostStepPoint().GetKineticEnergy() / g4.MeV
+        particle_name = track.GetDefinition().GetParticleName() if track.GetDefinition() else "unknown"
+
+        if edep_mev <= 0 and step_length_mm <= 0:
+            return True
+
+        self.tracks.add_electronics_step(
+            event_id=event_id,
+            track_id=track.GetTrackID(),
+            parent_id=track.GetParentID(),
+            particle_type=particle_name,
+            edep_mev=edep_mev,
+            step_length_mm=step_length_mm,
+            pre_energy_mev=pre_energy_mev,
+            post_energy_mev=post_energy_mev
+        )
+
+        electronics_info: Dict = self.screen_info.setdefault("Electronics", {})
+        electronics_info["deposited_energy_mev"] = (
+            electronics_info.get("deposited_energy_mev", 0.0) + float(edep_mev)
+        )
+        electronics_info["track_length_mm"] = (
+            electronics_info.get("track_length_mm", 0.0) + float(step_length_mm)
+        )
+        electronics_info["hit_count"] = electronics_info.get("hit_count", 0) + 1
+        return True
+
 class ScreenEventAction(g4.G4UserEventAction):
     def __init__(self):
         super().__init__()
@@ -266,6 +397,7 @@ class ScreenSteppingAction(g4.G4UserSteppingAction):
         self.current_particle = current_particle
     
     def UserSteppingAction(self, step: g4.G4Step):
+        pre = step.GetPreStepPoint()
         post = step.GetPostStepPoint()
         pos = post.GetPosition()
         track = step.GetTrack()
@@ -273,6 +405,7 @@ class ScreenSteppingAction(g4.G4UserSteppingAction):
 
         kin_energy = track.GetKineticEnergy() / g4.MeV
         z_pos = pos.z / g4.mm
+        pre_z_pos = pre.GetPosition().z / g4.mm
         # print("EVENT ID:", self.event_action.event_id)
         # print(f'EVENT ID: {self.event_action.event_id}\tTRACK ID: {track.GetTrackID()}\tkinenergy: {kin_energy}')
         
@@ -310,17 +443,16 @@ class ScreenSteppingAction(g4.G4UserSteppingAction):
         if self.event_action.event_id is not None:
             self.tracks.add(self.event_action.event_id, track.GetTrackID(), pos, particle_name)
         
-        if (pos.z / g4.mm) > self.screens_end_z_mm:
+        if pre_z_pos <= self.screens_end_z_mm < z_pos:
             key = (self.event_action.event_id or -1, track.GetTrackID())
-
-            # сохраняем энергию на выходе
-            self.tracks.add_exit_energy(track.GetKineticEnergy() / g4.MeV)
 
             if track.GetTrackID() == 1:
                 if key not in self.primary_out:
+                    self.tracks.add_exit_energy(track.GetKineticEnergy() / g4.MeV)
                     self.primary_out.append(key)
             else:
                 if key not in self.secondary_out:
+                    self.tracks.add_exit_energy(track.GetKineticEnergy() / g4.MeV)
                     self.secondary_out.append(key)
 
 class ActionInitialization(g4.G4VUserActionInitialization):
@@ -520,7 +652,7 @@ class SingleProcessSimulationRunner:
         global _geant4_initialized
         _geant4_initialized = True
         
-        geom = ScreenGeometry(data=data, screen_info=screen_info, cfg=cfg)
+        geom = ScreenGeometry(data=data, screen_info=screen_info, cfg=cfg, tracks=tracks)
         geom._precomputed_layout = layout
         run_manager.SetUserInitialization(geom)
         run_manager.SetUserInitialization(g4.FTFP_BERT())
@@ -566,7 +698,14 @@ class SingleProcessSimulationRunner:
         logging.info(f"simulation tracks: {tracks.exit_energies}")
         # logging.info(f"sum energy {sum(tracks.exit_energies) / len(tracks.exit_energies)}")
 
-        energy_summary = _compute_energy_summary(tracks.energy_profiles, tracks.exit_energies, layout)
+        energy_summary = _compute_energy_summary(
+            tracks.energy_profiles,
+            tracks.exit_energies,
+            layout,
+            electronics_hits=tracks.electronics_hits,
+            electronics_info=screen_info.get("Electronics"),
+            let_threshold_mev_cm2_mg=cfg.electronics_let_threshold_mev_cm2_mg
+        )
         logging.info(f'energy summary: {energy_summary}')
 
         # Обновляем screen_info корректными данными из energy_summary
@@ -593,6 +732,7 @@ class SingleProcessSimulationRunner:
             mixed_beam_result=mixed_result,
             energy_profiles=tracks.energy_profiles,
             exit_energies=tracks.exit_energies,
+            electronics_hits=tracks.electronics_hits,
             energy_summary=energy_summary
     )
 
@@ -689,7 +829,128 @@ def _find_stopped_particle_material(points: list, first_z: float, thicknesses: l
     
     return -1
 
-def _compute_energy_summary(energy_profiles: dict, exit_energies: list, layout: dict) -> dict:
+
+def _classify_let_risk(max_let_mev_cm2_mg: Optional[float], threshold_mev_cm2_mg: float) -> Dict[str, Any]:
+    if max_let_mev_cm2_mg is None:
+        return {
+            "level": "unknown",
+            "is_dangerous": False,
+            "reason": "В слое электроники не зарегистрировано отложение энергии, LET не определен."
+        }
+
+    if max_let_mev_cm2_mg >= threshold_mev_cm2_mg:
+        return {
+            "level": "high",
+            "is_dangerous": True,
+            "reason": (
+                f"Максимальный LET {max_let_mev_cm2_mg:.4f} MeV*cm^2/mg "
+                f"превышает порог {threshold_mev_cm2_mg:.4f} MeV*cm^2/mg."
+            )
+        }
+
+    if max_let_mev_cm2_mg >= 0.5 * threshold_mev_cm2_mg:
+        return {
+            "level": "moderate",
+            "is_dangerous": False,
+            "reason": (
+                f"Максимальный LET {max_let_mev_cm2_mg:.4f} MeV*cm^2/mg "
+                f"ниже порога {threshold_mev_cm2_mg:.4f} MeV*cm^2/mg, "
+                "но находится близко к нему."
+            )
+        }
+
+    return {
+        "level": "low",
+        "is_dangerous": False,
+        "reason": (
+            f"Максимальный LET {max_let_mev_cm2_mg:.4f} MeV*cm^2/mg "
+            f"существенно ниже порога {threshold_mev_cm2_mg:.4f} MeV*cm^2/mg."
+        )
+    }
+
+
+def _compute_electronics_let_summary(
+    electronics_hits: list,
+    electronics_info: Optional[dict],
+    threshold_mev_cm2_mg: float
+) -> dict:
+    if not electronics_info:
+        return {}
+
+    density_g_cm3 = float(electronics_info.get("density_g_cm3", 2.329))
+    material_name = electronics_info.get("material", "G4_Si")
+    valid_hits = []
+    
+    for hit in electronics_hits or []:
+        try:
+            track_length_mm = float(hit.get("track_length_mm", 0.0))
+            edep_mev = float(hit.get("edep_mev", 0.0))
+            if track_length_mm <= 0 or edep_mev <= 0:
+                continue
+
+            let_mev_per_mm = edep_mev / track_length_mm
+            let_mev_cm2_mg = let_mev_per_mm / (density_g_cm3 * 100.0) if density_g_cm3 > 0 else None
+            if let_mev_cm2_mg is None:
+                continue
+
+            valid_hits.append({
+                "event_id": hit.get("event_id"),
+                "track_id": hit.get("track_id"),
+                "parent_id": hit.get("parent_id", 0),
+                "particle": hit.get("particle", "unknown"),
+                "edep_mev": edep_mev,
+                "track_length_mm": track_length_mm,
+                "entry_energy_mev": hit.get("entry_energy_mev"),
+                "exit_energy_mev": hit.get("exit_energy_mev"),
+                "steps": hit.get("steps", 0),
+                "let_mev_per_mm": let_mev_per_mm,
+                "let_mev_cm2_mg": let_mev_cm2_mg
+            })
+        except (TypeError, ValueError):
+            continue
+
+    let_values = [hit["let_mev_cm2_mg"] for hit in valid_hits]
+    max_hit = max(valid_hits, key=lambda hit: hit["let_mev_cm2_mg"]) if valid_hits else None
+    above_threshold_count = sum(
+        1 for let_value in let_values
+        if let_value >= threshold_mev_cm2_mg
+    )
+    above_threshold_fraction = (
+        above_threshold_count / len(let_values)
+        if let_values else 0.0
+    )
+    risk = _classify_let_risk(
+        max_let_mev_cm2_mg=max(let_values) if let_values else None,
+        threshold_mev_cm2_mg=threshold_mev_cm2_mg
+    )
+
+    return {
+        "material": material_name,
+        "density_g_cm3": density_g_cm3,
+        "thickness_mm": electronics_info.get("thickness_mm"),
+        "threshold_mev_cm2_mg": threshold_mev_cm2_mg,
+        "hits_total": len(electronics_hits or []),
+        "tracks_with_deposition": len(valid_hits),
+        "avg_let_mev_cm2_mg": sum(let_values) / len(let_values) if let_values else None,
+        "max_let_mev_cm2_mg": max(let_values) if let_values else None,
+        "min_let_mev_cm2_mg": min(let_values) if let_values else None,
+        "above_threshold_count": above_threshold_count,
+        "above_threshold_fraction": above_threshold_fraction,
+        "above_threshold_percent": above_threshold_fraction * 100.0,
+        "is_dangerous": risk["is_dangerous"],
+        "risk_level": risk["level"],
+        "reason": risk["reason"],
+        "worst_case_track": max_hit
+    }
+
+def _compute_energy_summary(
+    energy_profiles: dict,
+    exit_energies: list,
+    layout: dict,
+    electronics_hits: Optional[list] = None,
+    electronics_info: Optional[dict] = None,
+    let_threshold_mev_cm2_mg: float = 1.0
+) -> dict:
         """Вычисляет сводную статистику по энергии.
         
         Ключевые определения:
@@ -699,7 +960,7 @@ def _compute_energy_summary(energy_profiles: dict, exit_energies: list, layout: 
         - absorbed_before_screen: вторичная частица, остановившаяся ДО экрана (в вакууме)
         """
         if not energy_profiles:
-            return {}
+            energy_profiles = {}
 
         first_z = layout.get("first_screen_front_z_mm", 0)
         end_z = layout.get("screens_end_z_mm", 0)
@@ -747,6 +1008,12 @@ def _compute_energy_summary(energy_profiles: dict, exit_energies: list, layout: 
                 f"составляет {exit_above_threshold_fraction * 100:.1f}%, что не превышает порог "
                 f"{assessment_max_allowed_fraction * 100:.1f}%."
             )
+
+        electronics_let = _compute_electronics_let_summary(
+            electronics_hits=electronics_hits or [],
+            electronics_info=electronics_info,
+            threshold_mev_cm2_mg=let_threshold_mev_cm2_mg
+        )
 
         # Статистика по первичным частицам
         primary_profiles = [
@@ -872,7 +1139,8 @@ def _compute_energy_summary(energy_profiles: dict, exit_energies: list, layout: 
                 "is_ineffective": screen_ineffective,
                 "verdict": assessment_verdict,
                 "reason": assessment_reason
-            }
+            },
+            "electronics_let": electronics_let
         }
 # -----------------------------
 # Запуск симуляции
@@ -884,10 +1152,17 @@ class SimulationRunner:
     def run_sequential_multiprocess(self, cfg: SimulationConfig) -> SimulationResult:
         """Запускает последовательные симуляции в отдельных процессах"""
         logging.info("Запускает последовательные симуляции в отдельных процессах")
+        if cfg.input_data is not None:
+            data = cfg.input_data
+        elif cfg.task_id is not None:
+            data = DataServer().get_current_task_to_json(cfg.task_id)
+        else:
+            raise ValueError("Either task_id or input_data must be provided")
         particle_results = {}
 
         all_energy_profiles = {}
         all_exit_energies = []
+        all_electronics_hits = []
         all_screen_info = None
         all_energy_summary = {}
 
@@ -904,6 +1179,10 @@ class SimulationRunner:
                 world_z_mm=cfg.world_z_mm,
                 screen_xy_mm=cfg.screen_xy_mm,
                 first_screen_z_mm=cfg.first_screen_z_mm,
+                electronics_gap_mm=cfg.electronics_gap_mm,
+                electronics_thickness_mm=cfg.electronics_thickness_mm,
+                electronics_material=cfg.electronics_material,
+                electronics_let_threshold_mev_cm2_mg=cfg.electronics_let_threshold_mev_cm2_mg,
                 collect_tracks=cfg.collect_tracks,
                 visualize=False,
                 use_mixed_beam=False
@@ -964,6 +1243,9 @@ class SimulationRunner:
                         logging.info(f'ex: {result_dict["exit_energies"]}')
                         all_exit_energies.extend(result_dict["exit_energies"])
 
+                    if "electronics_hits" in result_dict and result_dict["electronics_hits"]:
+                        all_electronics_hits.extend(result_dict["electronics_hits"])
+
                     if "energy_summary" in result_dict and result_dict["energy_summary"]:
                         logging.info(f'energy_summary: {result_dict["energy_summary"]}')
 
@@ -980,6 +1262,8 @@ class SimulationRunner:
                                 "Secondary_stuck_count": 0,
                                 "Edep": 0.0
                             })
+                        if res_screen.get("Electronics"):
+                            all_screen_info["Electronics"] = res_screen.get("Electronics")
 
                     if all_screen_info.get("Materials"):
                         for i, mat in enumerate(res_mats):
@@ -1012,7 +1296,10 @@ class SimulationRunner:
         energy_summary = _compute_energy_summary(
             energy_profiles=all_energy_profiles,
             exit_energies=all_exit_energies,
-            layout=layout
+            layout=layout,
+            electronics_hits=all_electronics_hits,
+            electronics_info=(all_screen_info or {}).get("Electronics"),
+            let_threshold_mev_cm2_mg=cfg.electronics_let_threshold_mev_cm2_mg
         )
         logging.info(f'res emergy summary: {energy_summary}')
 
@@ -1040,6 +1327,7 @@ class SimulationRunner:
             ),
             energy_profiles=all_energy_profiles,
             exit_energies=all_exit_energies,
+            electronics_hits=all_electronics_hits,
             energy_summary=energy_summary
         )
         logging.info(f"final simulation results: {sim_res}")
@@ -1162,8 +1450,8 @@ if __name__ == "__main__":
         input_data=data,
         particles=[
             ParticleConfig(name="He3", energy_mev=50.0),
-            ParticleConfig(name="alpha", energy_mev=50.0),
-            ParticleConfig(name="proton", energy_mev=50.0)
+            ParticleConfig(name="alpha", energy_mev=60.0),
+            ParticleConfig(name="proton", energy_mev=60.0)
             # ParticleConfig(name="e-", energy_mev=60.0)
         ],
         events=30,

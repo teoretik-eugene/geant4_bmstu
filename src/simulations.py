@@ -49,6 +49,10 @@ class SimulationConfig:
     world_z_mm: float = 500.0
     screen_xy_mm: float = 250.0
     first_screen_z_mm: float = 15.0
+    electronics_gap_mm: float = 0.1
+    electronics_thickness_mm: float = 0.05
+    electronics_material: str = "G4_Si"
+    electronics_let_threshold_mev_cm2_mg: float = 1.0
     collect_tracks: bool = False
     visualize: bool = False
 
@@ -98,6 +102,7 @@ class SimulationResult:
 
     energy_profiles: Optional[Dict] = None
     exit_energies: Optional[List[float]] = None
+    electronics_hits: Optional[List[Dict[str, Any]]] = None
     energy_summary: Optional[Dict] = None
     
     def to_dict(self) -> dict:
@@ -109,6 +114,9 @@ class SimulationResult:
 
         if self.exit_energies is not None:
             d["exit_energies"] = [float(e) for e in self.exit_energies]
+
+        if self.electronics_hits is not None:
+            d["electronics_hits"] = self.electronics_hits
         
         # Обработка particle_results
         if self.particle_results is not None:
