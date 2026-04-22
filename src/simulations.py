@@ -53,6 +53,7 @@ class SimulationConfig:
     electronics_thickness_mm: float = 0.05
     electronics_material: str = "G4_Si"
     electronics_let_threshold_mev_cm2_mg: float = 1.0
+    electronics_dose_threshold_gy: float = 5.0
     collect_tracks: bool = False
     visualize: bool = False
 

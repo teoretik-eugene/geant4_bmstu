@@ -250,6 +250,15 @@ class ScreenGeometry(g4.G4VUserDetectorConstruction):
                 "density_g_cm3": electronics_material.GetDensity() / (g4.g / g4.cm3),
                 "gap_mm": electronics_gap_mm,
                 "thickness_mm": electronics_thickness_mm,
+                "xy_size_mm": self.cfg.screen_xy_mm,
+                "volume_mm3": self.cfg.screen_xy_mm * self.cfg.screen_xy_mm * electronics_thickness_mm,
+                "mass_mg": (
+                    (self.cfg.screen_xy_mm / 10.0)
+                    * (self.cfg.screen_xy_mm / 10.0)
+                    * (electronics_thickness_mm / 10.0)
+                    * (electronics_material.GetDensity() / (g4.g / g4.cm3))
+                    * 1000.0
+                ),
                 "z_start_mm": self.screens_end_z_mm + electronics_gap_mm,
                 "z_end_mm": self.screens_end_z_mm + electronics_gap_mm + electronics_thickness_mm
             }
@@ -762,7 +771,8 @@ class SingleProcessSimulationRunner:
             layout,
             electronics_hits=tracks.electronics_hits,
             electronics_info=screen_info.get("Electronics"),
-            let_threshold_mev_cm2_mg=cfg.electronics_let_threshold_mev_cm2_mg
+            let_threshold_mev_cm2_mg=cfg.electronics_let_threshold_mev_cm2_mg,
+            dose_threshold_gy=cfg.electronics_dose_threshold_gy
         )
         logging.info(f'energy summary: {energy_summary}')
 
@@ -927,10 +937,53 @@ def _classify_let_risk(max_let_mev_cm2_mg: Optional[float], threshold_mev_cm2_mg
     }
 
 
+def _classify_dose_risk(absorbed_dose_gy: Optional[float], threshold_gy: float) -> Dict[str, Any]:
+    if absorbed_dose_gy is None:
+        return {
+            "level": "unknown",
+            "is_dangerous": False,
+            "is_protected": False,
+            "reason": "Поглощенная доза в электронике не определена."
+        }
+
+    if absorbed_dose_gy >= threshold_gy:
+        return {
+            "level": "high",
+            "is_dangerous": True,
+            "is_protected": False,
+            "reason": (
+                f"Поглощенная доза {absorbed_dose_gy:.6f} Gy превышает порог "
+                f"{threshold_gy:.6f} Gy для чувствительной электроники."
+            )
+        }
+
+    if absorbed_dose_gy >= 0.5 * threshold_gy:
+        return {
+            "level": "moderate",
+            "is_dangerous": False,
+            "is_protected": True,
+            "reason": (
+                f"Поглощенная доза {absorbed_dose_gy:.6f} Gy ниже порога "
+                f"{threshold_gy:.6f} Gy, но находится близко к нему."
+            )
+        }
+
+    return {
+        "level": "low",
+        "is_dangerous": False,
+        "is_protected": True,
+        "reason": (
+            f"Поглощенная доза {absorbed_dose_gy:.6f} Gy значительно ниже порога "
+            f"{threshold_gy:.6f} Gy."
+        )
+    }
+
+
 def _compute_electronics_let_summary(
     electronics_hits: list,
     electronics_info: Optional[dict],
-    threshold_mev_cm2_mg: float
+    threshold_mev_cm2_mg: float,
+    dose_threshold_gy: float
 ) -> dict:
     if not electronics_info:
         return {}
@@ -972,6 +1025,41 @@ def _compute_electronics_let_summary(
         hit["max_let_mev_cm2_mg"] for hit in valid_hits
         if hit["max_let_mev_cm2_mg"] is not None
     ]
+    event_max_let = {}
+    for hit in valid_hits:
+        event_id = hit.get("event_id")
+        hit_max_let = hit.get("max_let_mev_cm2_mg")
+        if event_id is None or hit_max_let is None:
+            continue
+        current = event_max_let.get(event_id)
+        event_max_let[event_id] = hit_max_let if current is None else max(current, hit_max_let)
+
+    upset_events_count = sum(
+        1 for let_value in event_max_let.values()
+        if let_value >= threshold_mev_cm2_mg
+    )
+    upset_events_fraction = (
+        upset_events_count / len(event_max_let)
+        if event_max_let else 0.0
+    )
+
+    deposited_energy_mev = sum(
+        float(hit.get("edep_mev", 0.0) or 0.0)
+        for hit in electronics_hits or []
+    )
+    mass_mg = float(electronics_info.get("mass_mg", 0.0) or 0.0)
+    mass_kg = mass_mg * 1e-6 if mass_mg > 0 else 0.0
+    absorbed_dose_gy = (
+        deposited_energy_mev * 1.602176634e-13 / mass_kg
+        if mass_kg > 0 else None
+    )
+    logging.info(f"deposited_energy_mev: {deposited_energy_mev}")
+    logging.info(f"absorbed_dose_gy: {absorbed_dose_gy}")
+    dose_risk = _classify_dose_risk(
+        absorbed_dose_gy=absorbed_dose_gy,
+        threshold_gy=dose_threshold_gy
+    )
+
     max_hit = max(valid_hits, key=lambda hit: hit.get("max_let_mev_cm2_mg") or 0.0) if valid_hits else None
     above_threshold_count = sum(
         1 for let_value in max_let_values
@@ -990,15 +1078,41 @@ def _compute_electronics_let_summary(
         "material": material_name,
         "density_g_cm3": density_g_cm3,
         "thickness_mm": electronics_info.get("thickness_mm"),
+        "mass_mg": mass_mg,
+        "deposited_energy_mev": deposited_energy_mev,
+        "absorbed_dose_gy": absorbed_dose_gy,
+        "dose_threshold_gy": dose_threshold_gy,
+        "dose_assessment": {
+            "threshold_gy": dose_threshold_gy,
+            "threshold_rad_si": dose_threshold_gy * 100.0,
+            "threshold_note": (
+                "По умолчанию используется консервативный порог 5 Gy "
+                "(около 500 rad(Si)) для чувствительной электроники; "
+                "для конкретной ЭКБ порог следует задавать отдельно."
+            ),
+            "is_dangerous": dose_risk["is_dangerous"],
+            "is_protected": dose_risk["is_protected"],
+            "risk_level": dose_risk["level"],
+            "verdict": "protected" if dose_risk["is_protected"] else "not_protected",
+            "reason": dose_risk["reason"]
+        },
         "threshold_mev_cm2_mg": threshold_mev_cm2_mg,
         "hits_total": len(electronics_hits or []),
         "tracks_with_deposition": len(valid_hits),
+        "events_with_hits": len(event_max_let),
         "avg_let_mev_cm2_mg": sum(mean_let_values) / len(mean_let_values) if mean_let_values else None,
         "max_let_mev_cm2_mg": max(max_let_values) if max_let_values else None,
         "min_let_mev_cm2_mg": min(mean_let_values) if mean_let_values else None,
         "above_threshold_count": above_threshold_count,
         "above_threshold_fraction": above_threshold_fraction,
         "above_threshold_percent": above_threshold_fraction * 100.0,
+        "event_upset_risk": {
+            "threshold_mev_cm2_mg": threshold_mev_cm2_mg,
+            "upset_events_count": upset_events_count,
+            "events_with_hits": len(event_max_let),
+            "upset_fraction": upset_events_fraction,
+            "upset_percent": upset_events_fraction * 100.0
+        },
         "is_dangerous": risk["is_dangerous"],
         "risk_level": risk["level"],
         "reason": risk["reason"],
@@ -1011,7 +1125,8 @@ def _compute_energy_summary(
     layout: dict,
     electronics_hits: Optional[list] = None,
     electronics_info: Optional[dict] = None,
-    let_threshold_mev_cm2_mg: float = 1.0
+    let_threshold_mev_cm2_mg: float = 1.0,
+    dose_threshold_gy: float = 5.0
 ) -> dict:
         """Вычисляет сводную статистику по энергии.
         
@@ -1074,7 +1189,8 @@ def _compute_energy_summary(
         electronics_let = _compute_electronics_let_summary(
             electronics_hits=electronics_hits or [],
             electronics_info=electronics_info,
-            threshold_mev_cm2_mg=let_threshold_mev_cm2_mg
+            threshold_mev_cm2_mg=let_threshold_mev_cm2_mg,
+            dose_threshold_gy=dose_threshold_gy
         )
 
         # Статистика по первичным частицам
@@ -1095,6 +1211,8 @@ def _compute_energy_summary(
         backscattered_primary = 0
         energy_loss_primary = []
         stopped_primary_by_material = {}
+        exited_primary_initial_energies = []
+        exited_primary_final_energies = []
 
         # Вторичные
         stopped_secondary = 0
@@ -1116,6 +1234,8 @@ def _compute_energy_summary(
                     # 1. Вышла за экран (Z > end_z)
                     if z_last > end_z:
                         exited_primary += 1
+                        exited_primary_initial_energies.append(e_start)
+                        exited_primary_final_energies.append(e_end)
                     # 2. Улетела назад (Z < first_z)
                     elif z_last < first_z:
                         backscattered_primary += 1
@@ -1155,6 +1275,50 @@ def _compute_energy_summary(
                 except (ValueError, TypeError, IndexError):
                     continue
 
+        mean_initial_exit_primary_energy = (
+            sum(exited_primary_initial_energies) / len(exited_primary_initial_energies)
+            if exited_primary_initial_energies else None
+        )
+        mean_final_exit_primary_energy = (
+            sum(exited_primary_final_energies) / len(exited_primary_final_energies)
+            if exited_primary_final_energies else None
+        )
+        transmission_energy_attenuation = (
+            1.0 - (mean_final_exit_primary_energy / mean_initial_exit_primary_energy)
+            if mean_initial_exit_primary_energy and mean_initial_exit_primary_energy > 0
+            and mean_final_exit_primary_energy is not None
+            else None
+        )
+        dose_assessment = electronics_let.get("dose_assessment", {})
+        event_upset_risk = electronics_let.get("event_upset_risk", {})
+        screen_protected = (
+            assessment_verdict == "effective"
+            and dose_assessment.get("is_protected", False)
+            and not electronics_let.get("is_dangerous", False)
+            and event_upset_risk.get("upset_events_count", 0) == 0
+        )
+        if screen_protected:
+            protection_reason = (
+                "Экран признан защитным: доля опасного выходного излучения ниже порога, "
+                "поглощенная доза в электронике ниже порога, опасный LET не зарегистрирован, "
+                "event upset risk не выявлен."
+            )
+        else:
+            failed_criteria = []
+            if assessment_verdict != "effective":
+                failed_criteria.append("по доле выходного излучения")
+            if not dose_assessment.get("is_protected", False):
+                failed_criteria.append("по поглощенной дозе")
+            if electronics_let.get("is_dangerous", False):
+                failed_criteria.append("по LET")
+            if event_upset_risk.get("upset_events_count", 0) > 0:
+                failed_criteria.append("по event upset risk")
+            protection_reason = (
+                "Экран не признан защитным " + ", ".join(failed_criteria) + "."
+                if failed_criteria else
+                "Экран не признан защитным."
+            )
+
         return {
             "primary_particles": {
                 "total": len(primary_profiles),
@@ -1163,6 +1327,13 @@ def _compute_energy_summary(
                 "exited_screen": exited_primary,
                 "backscattered": backscattered_primary,
                 "stopping_fraction": stopped_primary / len(primary_profiles) if primary_profiles else 0,
+                "mean_initial_energy_exited_mev": mean_initial_exit_primary_energy,
+                "mean_exit_energy_mev": mean_final_exit_primary_energy,
+                "energy_attenuation_fraction": transmission_energy_attenuation,
+                "energy_attenuation_percent": (
+                    transmission_energy_attenuation * 100.0
+                    if transmission_energy_attenuation is not None else None
+                ),
                 "avg_energy_loss": sum(energy_loss_primary) / len(energy_loss_primary) if energy_loss_primary else 0,
                 "max_energy_loss": max(energy_loss_primary) if energy_loss_primary else 0,
                 "min_energy_loss": min(energy_loss_primary) if energy_loss_primary else 0
@@ -1202,7 +1373,20 @@ def _compute_energy_summary(
                 "verdict": assessment_verdict,
                 "reason": assessment_reason
             },
-            "electronics_let": electronics_let
+            "electronics_let": electronics_let,
+            "screen_protection_report": {
+                "is_protected": screen_protected,
+                "verdict": "protected" if screen_protected else "not_protected",
+                "reason": protection_reason,
+                "criteria": {
+                    "exit_radiation": assessment_verdict,
+                    "dose": dose_assessment.get("verdict", "unknown"),
+                    "let": "safe" if not electronics_let.get("is_dangerous", False) else "dangerous",
+                    "event_upset_risk": (
+                        "safe" if event_upset_risk.get("upset_events_count", 0) == 0 else "dangerous"
+                    )
+                }
+            }
         }
 # -----------------------------
 # Запуск симуляции
@@ -1245,6 +1429,7 @@ class SimulationRunner:
                 electronics_thickness_mm=cfg.electronics_thickness_mm,
                 electronics_material=cfg.electronics_material,
                 electronics_let_threshold_mev_cm2_mg=cfg.electronics_let_threshold_mev_cm2_mg,
+                electronics_dose_threshold_gy=cfg.electronics_dose_threshold_gy,
                 collect_tracks=cfg.collect_tracks,
                 visualize=False,
                 use_mixed_beam=False
@@ -1325,7 +1510,11 @@ class SimulationRunner:
                                 "Edep": 0.0
                             })
                         if res_screen.get("Electronics"):
-                            all_screen_info["Electronics"] = res_screen.get("Electronics")
+                            electronics = dict(res_screen.get("Electronics"))
+                            electronics["deposited_energy_mev"] = float(electronics.get("deposited_energy_mev", 0.0) or 0.0)
+                            electronics["track_length_mm"] = float(electronics.get("track_length_mm", 0.0) or 0.0)
+                            electronics["hit_count"] = int(electronics.get("hit_count", 0) or 0)
+                            all_screen_info["Electronics"] = electronics
 
                     if all_screen_info.get("Materials"):
                         for i, mat in enumerate(res_mats):
@@ -1334,6 +1523,27 @@ class SimulationRunner:
                                 target["Primary_stuck_count"] += mat.get("Primary_stuck_count", 0)
                                 target["Secondary_stuck_count"] += mat.get("Secondary_stuck_count", 0)
                                 target["Edep"] = target.get("Edep", 0.0) + mat.get("Edep", 0.0)
+
+                    if all_screen_info and res_screen.get("Electronics"):
+                        target_electronics = all_screen_info.setdefault("Electronics", dict(res_screen.get("Electronics")))
+                        res_electronics = res_screen.get("Electronics", {})
+                        target_electronics["deposited_energy_mev"] = (
+                            float(target_electronics.get("deposited_energy_mev", 0.0) or 0.0)
+                            + float(res_electronics.get("deposited_energy_mev", 0.0) or 0.0)
+                        )
+                        target_electronics["track_length_mm"] = (
+                            float(target_electronics.get("track_length_mm", 0.0) or 0.0)
+                            + float(res_electronics.get("track_length_mm", 0.0) or 0.0)
+                        )
+                        target_electronics["hit_count"] = (
+                            int(target_electronics.get("hit_count", 0) or 0)
+                            + int(res_electronics.get("hit_count", 0) or 0)
+                        )
+                        if res_electronics.get("let_max_mev_cm2_mg") is not None:
+                            target_electronics["let_max_mev_cm2_mg"] = max(
+                                float(target_electronics.get("let_max_mev_cm2_mg", 0.0) or 0.0),
+                                float(res_electronics.get("let_max_mev_cm2_mg", 0.0) or 0.0)
+                            )
 
                 except Exception as e:
                     print(f"Failed: {key} - {e}")
@@ -1361,7 +1571,8 @@ class SimulationRunner:
             layout=layout,
             electronics_hits=all_electronics_hits,
             electronics_info=(all_screen_info or {}).get("Electronics"),
-            let_threshold_mev_cm2_mg=cfg.electronics_let_threshold_mev_cm2_mg
+            let_threshold_mev_cm2_mg=cfg.electronics_let_threshold_mev_cm2_mg,
+            dose_threshold_gy=cfg.electronics_dose_threshold_gy
         )
         logging.info(f'res emergy summary: {energy_summary}')
 
@@ -1471,7 +1682,7 @@ if __name__ == "__main__":
                 {
                     "Name": "Al",
                     "Description": "Алюминий (Al) толщиной 1000 мкм",
-                    "Width": 2000.0,
+                    "Width": 5000.0,
                     "Elements": [
                         {
                             "Name": "Титан",
@@ -1486,7 +1697,7 @@ if __name__ == "__main__":
                 {
                     "Name": "W",
                     "Description": "Вольфрам (W) толщиной 2000 мкм",
-                    "Width": 2000.0,
+                    "Width": 5000.0,
                     "Elements": [
                         {
                             "Name": "Вольфрам",
@@ -1505,7 +1716,7 @@ if __name__ == "__main__":
     Использовать для получения данных по task_id с сайта (раскоментировать строку)
     '''
     # data = ds.get_current_task_to_json(task_id)
-    
+    events = 100
     # Пример: Мульти-частичный последовательный режим
     cfg_multi = SimulationConfig(
         task_id=task_id,
@@ -1513,11 +1724,11 @@ if __name__ == "__main__":
         particles=[
             ParticleConfig(name="He3", energy_mev=70.0),
             ParticleConfig(name="alpha", energy_mev=70.0),
-            ParticleConfig(name="proton", energy_mev=70.0),
-            ParticleConfig(name="neutron", energy_mev=50.0)
+            ParticleConfig(name="proton", energy_mev=70.0)
+            # ParticleConfig(name="neutron", energy_mev=50.0)
             # ParticleConfig(name="e-", energy_mev=60.0)
         ],
-        events=30,
+        events=events,
         collect_tracks=True,
         visualize=True,
         use_mixed_beam=False  # Последовательные запуски в отдельных процессах
@@ -1528,8 +1739,8 @@ if __name__ == "__main__":
     logging.info(f"print results")
     logging.info(f'result object: {result}')
     logging.info(f'exit energies: {result.exit_energies}')
-    logging.info(json.dumps(result.to_dict(), indent=2, ensure_ascii=False))
     print(json.dumps(result.to_dict(), indent=2, ensure_ascii=False))
+    logging.info(json.dumps(result.to_dict(), indent=2, ensure_ascii=False))
 
     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     export_dir = f"out/simulation_visualization_{timestamp}"
