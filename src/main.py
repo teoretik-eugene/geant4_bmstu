@@ -556,7 +556,7 @@ class SingleParticlePrimaryGenerator(g4.G4VUserPrimaryGeneratorAction):
     """Генератор для одиночного типа частиц"""
     def __init__(self, particle_name: str, energy_mev: float, source_z_mm: float):
         super().__init__()
-        self.fParticleGun = g4.G4ParticleGun(1)
+        self.fParticleGun = g4.G4ParticleGun(10)
         particle_table = g4.G4ParticleTable.GetParticleTable()
         particle = particle_table.FindParticle(particle_name)
         if particle is None:
@@ -1472,7 +1472,7 @@ class SimulationRunner:
                         tracks=tracks
                     )
                     particle_results[key] = result
-                    logging.info(f"cfg result: {particle_results[key]}")
+                    # logging.info(f"cfg result: {particle_results[key]}")
                     print(f"Completed: {key}")
                     logging.info(f"Completed: {key}")                  
 
@@ -1484,7 +1484,7 @@ class SimulationRunner:
                     else :
                         logging.info("no energy profiles")
 
-                    logging.info(f"all energy profiles: {all_energy_profiles}")
+                    # logging.info(f"all energy profiles: {all_energy_profiles}")
 
                     if "exit_energies" in result_dict and result_dict["exit_energies"]:
                         logging.info(f'ex: {result_dict["exit_energies"]}')
@@ -1655,17 +1655,6 @@ def _cleanup_geant4():
 
 atexit.register(_cleanup_geant4)
 
-def export_to_html(plotter, filename="visualization.html"):
-    """Экспортирует сцену PyVista в HTML файл"""
-    try:
-        # Используем экспорт в HTML
-        plotter.export_html(filename)
-        print(f"Визуализация экспортирована в {filename}")
-    except Exception as e:
-        print(f"Ошибка при экспорте в HTML: {e}")
-        # Альтернативный способ через сохранение и встраивание
-        plotter.show(screenshot=filename.replace('.html', '.png'))
-
 # Обновите основную часть кода в конце файла:
 
 if __name__ == "__main__":
@@ -1682,7 +1671,7 @@ if __name__ == "__main__":
                 {
                     "Name": "Al",
                     "Description": "Алюминий (Al) толщиной 1000 мкм",
-                    "Width": 5000.0,
+                    "Width": 3000.0,
                     "Elements": [
                         {
                             "Name": "Титан",
@@ -1697,7 +1686,7 @@ if __name__ == "__main__":
                 {
                     "Name": "W",
                     "Description": "Вольфрам (W) толщиной 2000 мкм",
-                    "Width": 5000.0,
+                    "Width": 2000.0,
                     "Elements": [
                         {
                             "Name": "Вольфрам",
@@ -1739,8 +1728,9 @@ if __name__ == "__main__":
     logging.info(f"print results")
     logging.info(f'result object: {result}')
     logging.info(f'exit energies: {result.exit_energies}')
-    print(json.dumps(result.to_dict(), indent=2, ensure_ascii=False))
-    logging.info(json.dumps(result.to_dict(), indent=2, ensure_ascii=False))
+    # print(json.dumps(result.to_dict(), indent=2, ensure_ascii=False))
+    # logging.info(json.dumps(result.to_dict(), indent=2, ensure_ascii=False))
+    print(json.dumps(result.to_dict()["energy_summary"], indent=2, ensure_ascii=False))
 
     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     export_dir = f"out/simulation_visualization_{timestamp}"
