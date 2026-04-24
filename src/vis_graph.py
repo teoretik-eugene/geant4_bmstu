@@ -12,11 +12,6 @@ logging.basicConfig(
     format="%(asctime)s - %(levelname)s - %(message)s",
 )
 
-DEFAULT_MAX_TRACKS = int(os.getenv("VIS_MAX_TRACKS", "4000"))
-DEFAULT_MAX_POINTS_PER_TRACK = int(os.getenv("VIS_MAX_POINTS_PER_TRACK", "120"))
-DEFAULT_MAX_TOTAL_POINTS = int(os.getenv("VIS_MAX_TOTAL_POINTS", "250000"))
-
-
 def get_particle_color(particle_name):
     """Returns a color for a particle type."""
     color_map = {
@@ -51,30 +46,8 @@ def get_particle_color(particle_name):
     return color_map["unknown"]
 
 
-def _downsample_track_points(points, max_points):
-    if not points or len(points) < 2:
-        return []
-
-    max_points = max(2, int(max_points))
-    if len(points) <= max_points:
-        return [tuple(map(float, p)) for p in points]
-
-    last_index = len(points) - 1
-    sampled_indices = []
-    for i in range(max_points):
-        idx = round(i * last_index / (max_points - 1))
-        if not sampled_indices or idx != sampled_indices[-1]:
-            sampled_indices.append(idx)
-
-    if sampled_indices[-1] != last_index:
-        sampled_indices[-1] = last_index
-
-    return [tuple(map(float, points[idx])) for idx in sampled_indices]
-
-
 def _build_polyline_mesh(pv, batched_tracks):
     import numpy as np
-
     all_points = []
     line_cells = []
     offset = 0
@@ -100,12 +73,12 @@ def _build_polyline_mesh(pv, batched_tracks):
 
 
 def _add_tracks_batched(plotter, pv, track_iterable):
+    import numpy as np
     grouped_tracks = {}
     particle_counts = {}
     total_tracks = 0
     shown_tracks = 0
-    shown_points = 0
-    skipped_tracks = 0
+    total_points = 0
 
     for particle_name, track_id, pts in track_iterable:
         if len(pts) < 2:
@@ -114,26 +87,11 @@ def _add_tracks_batched(plotter, pv, track_iterable):
         total_tracks += 1
         particle_counts[particle_name] = particle_counts.get(particle_name, 0) + 1
 
-        if shown_tracks >= DEFAULT_MAX_TRACKS or shown_points >= DEFAULT_MAX_TOTAL_POINTS:
-            skipped_tracks += 1
-            continue
-
-        simplified = _downsample_track_points(pts, DEFAULT_MAX_POINTS_PER_TRACK)
-        remaining_points = DEFAULT_MAX_TOTAL_POINTS - shown_points
-        if remaining_points < 2:
-            skipped_tracks += 1
-            continue
-        if len(simplified) > remaining_points:
-            simplified = _downsample_track_points(simplified, remaining_points)
-        if len(simplified) < 2:
-            skipped_tracks += 1
-            continue
-
         color = get_particle_color(particle_name)
         line_width = 2 if track_id == 1 else 1
-        grouped_tracks.setdefault((color, line_width), []).append(simplified)
-        shown_tracks += 1
-        shown_points += len(simplified)
+        original_points = [tuple(map(float, p)) for p in pts]
+        grouped_tracks.setdefault((color, line_width), []).append(original_points)
+        total_points += len(original_points)
 
     for (color, line_width), tracks in grouped_tracks.items():
         mesh = _build_polyline_mesh(pv, tracks)
@@ -144,9 +102,9 @@ def _add_tracks_batched(plotter, pv, track_iterable):
     return {
         "particle_counts": particle_counts,
         "total_tracks": total_tracks,
-        "shown_tracks": shown_tracks,
-        "shown_points": shown_points,
-        "skipped_tracks": skipped_tracks,
+        "shown_tracks": total_tracks,
+        "shown_points": total_points,
+        "skipped_tracks": 0,
     }
 
 
@@ -167,19 +125,22 @@ def _add_screen_geometry(plotter, pv, cfg: SimulationConfig, layout: dict, scree
 
 def plot_energy_analysis(result: SimulationResult, cfg: SimulationConfig, data: dict, dir: str):
     import matplotlib.pyplot as plt
+    import numpy as np
 
     out_dir = f"{dir}/energy_analysis"
     os.makedirs(out_dir, exist_ok=True)
     layout = compute_layout(cfg=cfg, data=data)
 
     if hasattr(result, "energy_profiles") and result.energy_profiles:
-        plt.figure()
-        first_z = layout["first_screen_front_z_mm"]
-        end_z = layout["screens_end_z_mm"]
+        plt.figure(figsize=(10, 6))
+        first_z = layout.get("first_screen_front_z_mm", 0) or 0
+        end_z = layout.get("screens_end_z_mm", 0) or 0
         screen_thickness = end_z - first_z if end_z else 0
-
+        profiles = list(result.energy_profiles.values())
         logging.info("plot result screen info: %s", result)
         logging.info("first_z: %s end_z: %s", first_z, end_z)
+
+        z_data, e_data, colors, alphas = [], [], [], []
 
         if first_z is None:
             first_z = 0
@@ -194,45 +155,29 @@ def plot_energy_analysis(result: SimulationResult, cfg: SimulationConfig, data: 
         }
         type_counts = {}
 
-        for track_data in result.energy_profiles.values():
-            points = track_data["points"]
-            if len(points) < 2:
-                continue
+        for track_data in profiles:
+            points = track_data.get("points", [])
+            if len(points) < 2: continue
 
-            z_abs = [p[0] for p in points]
-            energies = [p[1] for p in points]
-            z_rel = [zi - first_z for zi in z_abs]
+            z_abs = np.array([p[0] for p in points], dtype=np.float32)
+            energies = np.array([p[1] for p in points], dtype=np.float32)
+            z_rel = z_abs - first_z
 
-            filtered = [
-                (zr, e)
-                for zr, e in zip(z_rel, energies)
-                if -5 <= zr <= (end_z - first_z + 10 if end_z else 100)
-            ]
+            mask = (z_rel >= -5) & (z_rel <= screen_thickness + 10)
+            zf, ef = z_rel[mask], energies[mask]
+            if len(zf) < 2: continue
 
-            if len(filtered) < 2:
-                continue
-
-            zf, ef = zip(*filtered)
             p_type = track_data.get("particle", "unknown").lower()
             is_primary = track_data.get("parent_id", 0) == 0
-
             base_color = particle_colors.get(p_type, "gray" if not is_primary else "blue")
-            alpha = 0.5 if is_primary else 0.3
-            lw = 1.5 if is_primary else 1.0
 
-            if is_primary:
-                type_counts[p_type] = type_counts.get(p_type, 0) + 1
+            z_data.extend(zf.tolist())
+            e_data.extend(ef.tolist())
+            colors.extend([base_color] * len(zf))
+            alphas.extend([0.5 if is_primary else 0.3] * len(zf))
 
-            label = (
-                f"{p_type.capitalize()} ({type_counts[p_type]})"
-                if is_primary and type_counts[p_type] == 1
-                else ""
-            )
-
-            plt.plot(zf, ef, color=base_color, alpha=alpha, linewidth=lw, label=label)
-
-            if ef[-1] < 0.01:
-                plt.scatter(zf[-1], ef[-1], color=base_color, s=15, zorder=5)
+        if z_data:
+            plt.scatter(z_data, e_data, c=colors, s=2, alpha=np.array(alphas), edgecolors='none')
 
         handles, labels = plt.gca().get_legend_handles_labels()
         by_label = dict(zip(labels, handles))
@@ -353,7 +298,7 @@ def visualize_multi_particle_results(cfg: SimulationConfig, result: SimulationRe
         print(f"  {particle_name}: {count} tracks")
     print(
         f"Displayed {stats['shown_tracks']} of {stats['total_tracks']} tracks "
-        f"({stats['shown_points']} points after simplification)"
+        f"({stats['shown_points']} original points)"
     )
 
 

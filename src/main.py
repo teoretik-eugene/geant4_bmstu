@@ -556,7 +556,7 @@ class SingleParticlePrimaryGenerator(g4.G4VUserPrimaryGeneratorAction):
     """Генератор для одиночного типа частиц"""
     def __init__(self, particle_name: str, energy_mev: float, source_z_mm: float):
         super().__init__()
-        self.fParticleGun = g4.G4ParticleGun(10)
+        self.fParticleGun = g4.G4ParticleGun(100)
         particle_table = g4.G4ParticleTable.GetParticleTable()
         particle = particle_table.FindParticle(particle_name)
         if particle is None:
@@ -1730,7 +1730,7 @@ if __name__ == "__main__":
     logging.info(f'exit energies: {result.exit_energies}')
     # print(json.dumps(result.to_dict(), indent=2, ensure_ascii=False))
     # logging.info(json.dumps(result.to_dict(), indent=2, ensure_ascii=False))
-    print(json.dumps(result.to_dict()["energy_summary"], indent=2, ensure_ascii=False))
+    # print(json.dumps(result.to_dict()["energy_summary"], indent=2, ensure_ascii=False))
 
     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     export_dir = f"out/simulation_visualization_{timestamp}"
