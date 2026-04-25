@@ -1,9 +1,9 @@
 version: '3.8'
 
 services:
-  geant4-api:
+  geant4-web-controller:
     build: .
-    container_name: geant4-simulation-api
+    container_name: geant4-web-controller
     ports:
       - "8000:8000"
     volumes:
@@ -12,4 +12,19 @@ services:
       - PYTHONPATH=/app/src
       - GEANT4_DATA=/app/geant4/data
     working_dir: /app/src
+    command: sh -c "uvicorn web_controller:app --host 0.0.0.0 --port 8000"
+    restart: unless-stopped
+
+  geant4-web-app:
+    build: .
+    container_name: geant4-web-app
+    ports:
+      - "8010:8010"
+    volumes:
+      - ./src:/app/src
+    environment:
+      - PYTHONPATH=/app/src
+      - GEANT4_DATA=/app/geant4/data
+    working_dir: /app/src
+    command: sh -c "uvicorn web_app:app --host 0.0.0.0 --port 8010"
     restart: unless-stopped

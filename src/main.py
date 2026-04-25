@@ -556,7 +556,7 @@ class SingleParticlePrimaryGenerator(g4.G4VUserPrimaryGeneratorAction):
     """Генератор для одиночного типа частиц"""
     def __init__(self, particle_name: str, energy_mev: float, source_z_mm: float):
         super().__init__()
-        self.fParticleGun = g4.G4ParticleGun(100)
+        self.fParticleGun = g4.G4ParticleGun(1)
         particle_table = g4.G4ParticleTable.GetParticleTable()
         particle = particle_table.FindParticle(particle_name)
         if particle is None:
