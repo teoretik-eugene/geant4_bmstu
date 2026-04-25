@@ -93,6 +93,18 @@
       vertical-align: top;
     }
     .elements input { min-width: 80px; }
+    .particles {
+      width: 100%;
+      border-collapse: collapse;
+      margin-bottom: 8px;
+    }
+    .particles th, .particles td {
+      border-bottom: 1px solid var(--line);
+      padding: 6px;
+      font-size: 12px;
+      text-align: left;
+      vertical-align: top;
+    }
     @media (max-width: 980px) {
       .grid, .result-grid { grid-template-columns: repeat(2, minmax(120px, 1fr)); }
       .layer-head { grid-template-columns: 1fr; }
@@ -103,10 +115,9 @@
   <div class="container">
     <div class="card">
       <h1>Shield Configurator</h1>
-      <p>Configure layers and element composition, then run Geant4 simulation.</p>
+      <p>Configure beam, layers and element composition, then run Geant4 simulation.</p>
       <div class="grid">
-        <div><label>Particle</label><select id="particle"></select></div>
-        <div><label>Energy (MeV)</label><input id="energy" type="number" value="40" step="0.1"></div>
+        <div><label>Beam Mode</label><select id="beamMode"><option value="sequential" selected>Sequential runs</option><option value="mixed">Mixed beam</option></select></div>
         <div><label>Events</label><input id="events" type="number" value="100" min="1"></div>
         <div><label>Collect tracks</label><select id="tracks"><option value="true">Yes</option><option value="false" selected>No</option></select></div>
         <div><label>World XY (mm)</label><input id="world_xy" type="number" value="500"></div>
@@ -114,12 +125,26 @@
         <div><label>Screen XY (mm)</label><input id="screen_xy" type="number" value="250"></div>
         <div><label>First Screen Z (mm)</label><input id="first_z" type="number" value="15"></div>
       </div>
+      <div class="btns" style="margin-top: 12px;">
+        <button type="button" class="add" id="addParticleBtn" onclick="addParticleFromUi()">+ Add particle</button>
+        <button type="button" class="remove" id="removeParticleBtn" onclick="removeParticleFromUi()">- Remove last particle</button>
+      </div>
+      <table class="particles" id="particlesTable">
+        <thead>
+          <tr>
+            <th>Particle</th>
+            <th>Energy (MeV)</th>
+            <th>Weight (for mixed beam)</th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
     </div>
 
     <div class="card">
       <div class="btns">
-        <button class="add" id="addLayerBtn">+ Add layer</button>
-        <button class="remove" id="removeLayerBtn">- Remove last layer</button>
+        <button type="button" class="add" id="addLayerBtn">+ Add layer</button>
+        <button type="button" class="remove" id="removeLayerBtn">- Remove last layer</button>
       </div>
       <p class="muted">
         Each layer has its own element list. For every element set: Symbol, Atomic number,
@@ -130,7 +155,7 @@
 
     <div class="card">
       <div class="btns">
-        <button class="run" id="runBtn">Run simulation</button>
+        <button type="button" class="run" id="runBtn">Run simulation</button>
       </div>
       <div id="status" class="status"></div>
     </div>

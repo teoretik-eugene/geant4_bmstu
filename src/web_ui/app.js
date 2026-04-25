@@ -32,6 +32,12 @@ const defaultLayers = [
 ];
 
 let layerCounter = 0;
+let availableParticles = ["He3", "e-", "proton", "alpha", "neutron", "gamma"];
+let defaultParticle = "He3";
+const defaultBeamParticles = [
+  { name: "He3", energy_mev: 40, weight: 1 },
+  { name: "proton", energy_mev: 40, weight: 1 },
+];
 
 function setStatus(text, ok = true) {
   const s = document.getElementById("status");
@@ -168,6 +174,46 @@ function readLayers() {
   });
 }
 
+function buildParticleOptions(selected) {
+  return availableParticles
+    .map((p) => `<option value="${p}" ${p === selected ? "selected" : ""}>${p}</option>`)
+    .join("");
+}
+
+function addParticleRow(particle = null) {
+  const p = particle || { name: defaultParticle, energy_mev: 40, weight: 1 };
+  const row = document.createElement("tr");
+  row.className = "particle-row";
+  row.innerHTML = `
+    <td><select data-particle-field="name">${buildParticleOptions(p.name)}</select></td>
+    <td><input data-particle-field="energy_mev" type="number" value="${p.energy_mev}" min="0.0001" step="0.1"></td>
+    <td><input data-particle-field="weight" type="number" value="${p.weight}" min="0.0001" step="0.1"></td>
+  `;
+  const tbody = document.querySelector("#particlesTable tbody");
+  if (!tbody) return;
+  tbody.appendChild(row);
+}
+
+function removeParticleRow() {
+  const body = document.querySelector("#particlesTable tbody");
+  if (!body) return;
+  const rows = body.querySelectorAll(".particle-row");
+  if (rows.length > 0) {
+    body.removeChild(rows[rows.length - 1]);
+  }
+}
+
+function readParticles() {
+  return [...document.querySelectorAll("#particlesTable tbody .particle-row")].map((row) => {
+    const get = (field) => row.querySelector(`[data-particle-field="${field}"]`);
+    return {
+      name: get("name").value,
+      energy_mev: Number(get("energy_mev").value),
+      weight: Number(get("weight").value),
+    };
+  });
+}
+
 function renderKpi(report) {
   const kpis = document.getElementById("kpis");
   const pct = (value) => (value * 100).toFixed(2) + "%";
@@ -186,7 +232,21 @@ function renderLayerReport(report) {
     (x) =>
       `${x.index}. ${x.name}: ${x.thickness_mm.toFixed(3)} mm | primary_stuck=${x.primary_stuck}, secondary_stuck=${x.secondary_stuck}, Edep=${x.edep_mev.toFixed(4)} MeV`,
   );
-  document.getElementById("layerReport").textContent = lines.join("\n") || "No data";
+  const particleLines = [];
+  const particleResults = report.particle_results || {};
+  for (const [key, value] of Object.entries(particleResults)) {
+    const total = Number(value.total_particles || 0);
+    const out = Number(value.total_out_primary_particles || 0);
+    const rate = total > 0 ? ((out / total) * 100).toFixed(2) : "0.00";
+    particleLines.push(`${key}: total=${total}, out_primary=${out}, transmission=${rate}%`);
+  }
+  const full = [...lines];
+  if (particleLines.length) {
+    full.push("");
+    full.push("Per-particle:");
+    full.push(...particleLines);
+  }
+  document.getElementById("layerReport").textContent = full.join("\n") || "No data";
 }
 
 function renderFiles(files) {
@@ -204,23 +264,31 @@ function renderFiles(files) {
 }
 
 async function loadParticles() {
-  const res = await fetch("/api/particles");
-  const data = await res.json();
-  const select = document.getElementById("particle");
-  select.innerHTML = "";
-  data.particles.forEach((p) => {
-    const opt = document.createElement("option");
-    opt.value = p;
-    opt.textContent = p;
-    if (p === data.default) opt.selected = true;
-    select.appendChild(opt);
-  });
+  try {
+    const res = await fetch("/api/particles");
+    const data = await res.json();
+    availableParticles = data.particles || availableParticles;
+    defaultParticle = data.default || defaultParticle;
+  } catch (e) {
+    // fallback to built-in list
+  }
+  const body = document.querySelector("#particlesTable tbody");
+  body.innerHTML = "";
+  defaultBeamParticles.forEach((p) => addParticleRow(p));
 }
 
 async function runSimulation() {
+  const particles = readParticles();
+  if (!particles.length) {
+    setStatus("Error: add at least one particle.", false);
+    return;
+  }
+
   const payload = {
-    particle: document.getElementById("particle").value,
-    energy_mev: Number(document.getElementById("energy").value),
+    particle: particles[0].name,
+    energy_mev: particles[0].energy_mev,
+    particles,
+    use_mixed_beam: document.getElementById("beamMode").value === "mixed",
     events: Number(document.getElementById("events").value),
     collect_tracks: document.getElementById("tracks").value === "true",
     world_xy_mm: Number(document.getElementById("world_xy").value),
@@ -257,15 +325,39 @@ async function runSimulation() {
   }
 }
 
-document.getElementById("addLayerBtn").addEventListener("click", () => addLayer());
-document.getElementById("removeLayerBtn").addEventListener("click", removeLayer);
-document.getElementById("runBtn").addEventListener("click", runSimulation);
-document.getElementById("layersContainer").addEventListener("click", (event) => {
-  const target = event.target;
-  if (!(target instanceof HTMLElement)) return;
-  if (target.classList.contains("add-element-btn")) addElement(target);
-  if (target.classList.contains("remove-element-btn")) removeElement(target);
-});
+function initUi() {
+  const addLayerBtn = document.getElementById("addLayerBtn");
+  const removeLayerBtn = document.getElementById("removeLayerBtn");
+  const addParticleBtn = document.getElementById("addParticleBtn");
+  const removeParticleBtn = document.getElementById("removeParticleBtn");
+  const runBtn = document.getElementById("runBtn");
+  const layersContainer = document.getElementById("layersContainer");
 
-defaultLayers.forEach((layer) => addLayer(layer));
-loadParticles();
+  if (addLayerBtn) addLayerBtn.addEventListener("click", () => addLayer());
+  if (removeLayerBtn) removeLayerBtn.addEventListener("click", removeLayer);
+  if (addParticleBtn) addParticleBtn.addEventListener("click", () => addParticleRow());
+  if (removeParticleBtn) removeParticleBtn.addEventListener("click", removeParticleRow);
+  if (runBtn) runBtn.addEventListener("click", runSimulation);
+
+  if (layersContainer) {
+    layersContainer.addEventListener("click", (event) => {
+      const target = event.target;
+      if (!(target instanceof HTMLElement)) return;
+      if (target.classList.contains("add-element-btn")) addElement(target);
+      if (target.classList.contains("remove-element-btn")) removeElement(target);
+    });
+  }
+
+  defaultLayers.forEach((layer) => addLayer(layer));
+  loadParticles();
+}
+
+if (document.readyState === "loading") {
+  document.addEventListener("DOMContentLoaded", initUi);
+} else {
+  initUi();
+}
+
+// Fallback handlers for inline onclick (more robust across page cache/reload issues)
+window.addParticleFromUi = () => addParticleRow();
+window.removeParticleFromUi = () => removeParticleRow();

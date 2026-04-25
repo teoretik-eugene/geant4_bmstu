@@ -34,6 +34,8 @@ class SimulationRequest(BaseModel):
     task_id: int = 0
     particle: str = "He3"
     energy_mev: float = 40.0
+    particles: Optional[List[Dict[str, Any]]] = None
+    use_mixed_beam: bool = False
     events: int = 100
     collect_tracks: bool = False
     input_data: Optional[dict] = None
@@ -67,6 +69,10 @@ def _build_report(result_dict: Dict[str, Any]) -> Dict[str, Any]:
     total_particles = int(result_dict.get("total_particles") or 0)
     out_primary = int(result_dict.get("total_out_primary_particles") or 0)
     out_secondary = int(result_dict.get("total_out_secondary_particles") or 0)
+    particle_results = result_dict.get("particle_results") or {}
+    if total_particles <= 0 and particle_results:
+        total_particles = sum(int(v.get("total_particles") or 0) for v in particle_results.values())
+
     stopped_primary = max(total_particles - out_primary, 0)
     transmission = (out_primary / total_particles) if total_particles else 0.0
     stopping_eff = (stopped_primary / total_particles) if total_particles else 0.0
@@ -96,6 +102,8 @@ def _build_report(result_dict: Dict[str, Any]) -> Dict[str, Any]:
         "layers": layer_rows,
         "electronics": screen_info.get("Electronics"),
         "energy_summary": result_dict.get("energy_summary"),
+        "particle_results": particle_results,
+        "comparison": result_dict.get("comparison"),
     }
 
 
@@ -145,24 +153,42 @@ with open(r\"{config_file}\", "r", encoding="utf-8") as f:
 
 cfg = SimulationConfig(**config_dict)
 runner = SimulationRunner()
-result = runner.run(cfg)
+result = runner.run(cfg).to_dict()
 
 with open(r\"{result_file}\", "w", encoding="utf-8") as f:
-    json.dump(result.to_dict(), f, indent=2, ensure_ascii=False)
+    json.dump(result, f, indent=2, ensure_ascii=False)
 """,
         ]
+        last_stdout = ""
+        last_stderr = ""
+        for attempt in range(2):
+            process = subprocess.Popen(
+                cmd,
+                cwd=os.path.dirname(__file__),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            stdout, stderr = process.communicate(timeout=900)
+            last_stdout, last_stderr = stdout, stderr
+            if process.returncode == 0:
+                break
 
-        process = subprocess.Popen(
-            cmd,
-            cwd=os.path.dirname(__file__),
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-        )
-        stdout, stderr = process.communicate(timeout=900)
-        if process.returncode != 0:
-            logger.error("Simulation subprocess failed. stdout=%s stderr=%s", stdout, stderr)
+            stderr_lower = (stderr or "").lower()
+            is_corrupted_list = "corrupted double-linked list" in stderr_lower
+            should_retry = attempt == 0 and is_corrupted_list
+            logger.error(
+                "Simulation subprocess failed (attempt %s). stdout=%s stderr=%s",
+                attempt + 1,
+                stdout,
+                stderr,
+            )
+            if should_retry:
+                logger.warning("Retrying simulation %s once due to allocator corruption", simulation_id)
+                continue
             return {"status": "failed", "result": None, "error": f"Process failed: {stderr}"}
+        else:
+            return {"status": "failed", "result": None, "error": f"Process failed: {last_stderr}"}
 
         if not os.path.exists(result_file):
             return {"status": "failed", "result": None, "error": "Result file not found"}

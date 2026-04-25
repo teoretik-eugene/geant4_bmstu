@@ -45,9 +45,19 @@ class LayerInput(BaseModel):
     elements: List[ElementInput] = Field(default_factory=list, min_length=1)
 
 
+class BeamParticleInput(BaseModel):
+    name: str = Field(..., min_length=1)
+    energy_mev: float = Field(..., gt=0.0)
+    weight: float = Field(1.0, gt=0.0)
+
+
 class RunRequest(BaseModel):
+    # Backward-compatible fields (single particle mode)
     particle: str = Field("He3")
     energy_mev: float = Field(40.0, gt=0)
+    # New multi-particle fields
+    particles: List[BeamParticleInput] = Field(default_factory=list)
+    use_mixed_beam: bool = False
     events: int = Field(100, ge=1, le=1_000_000)
     collect_tracks: bool = False
     world_xy_mm: float = Field(500.0, gt=0)
@@ -144,14 +154,23 @@ def particles() -> Dict[str, Any]:
 
 @app.post("/api/run")
 def run_simulation(payload: RunRequest) -> Dict[str, Any]:
-    if payload.particle not in AVAILABLE_PARTICLES:
-        raise HTTPException(status_code=400, detail=f"Unsupported particle: {payload.particle}")
+    particles = payload.particles or [
+        BeamParticleInput(name=payload.particle, energy_mev=payload.energy_mev, weight=1.0)
+    ]
+    if not particles:
+        raise HTTPException(status_code=400, detail="At least one particle is required")
+    for p in particles:
+        if p.name not in AVAILABLE_PARTICLES:
+            raise HTTPException(status_code=400, detail=f"Unsupported particle: {p.name}")
 
     input_data = _build_input_data(payload)
+    first_particle = particles[0]
     controller_payload: Dict[str, Any] = {
         "task_id": 0,
-        "particle": payload.particle,
-        "energy_mev": payload.energy_mev,
+        "particle": first_particle.name,
+        "energy_mev": first_particle.energy_mev,
+        "particles": [p.model_dump() for p in particles],
+        "use_mixed_beam": payload.use_mixed_beam,
         "events": payload.events,
         "collect_tracks": payload.collect_tracks,
         "input_data": input_data,
