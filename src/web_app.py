@@ -67,6 +67,8 @@ class RunRequest(BaseModel):
     electronics_gap_mm: float = Field(0.1, ge=0)
     electronics_thickness_mm: float = Field(0.05, ge=0)
     electronics_material: str = Field("G4_Si")
+    electronics_dose_threshold_gy: float = Field(5.0, ge=0)
+    electronics_let_threshold_mev_cm2_mg: float = Field(1.0, ge=0)
     build_energy_plots: bool = True
     layers: List[LayerInput] = Field(default_factory=list, min_length=1)
 
@@ -181,6 +183,8 @@ def run_simulation(payload: RunRequest) -> Dict[str, Any]:
         "electronics_gap_mm": payload.electronics_gap_mm,
         "electronics_thickness_mm": payload.electronics_thickness_mm,
         "electronics_material": payload.electronics_material,
+        "electronics_dose_threshold_gy": payload.electronics_dose_threshold_gy,
+        "electronics_let_threshold_mev_cm2_mg": payload.electronics_let_threshold_mev_cm2_mg,
         "build_energy_plots": payload.build_energy_plots,
     }
 

@@ -216,6 +216,10 @@ function readParticles() {
 function renderKpi(report) {
   const kpis = document.getElementById("kpis");
   const pct = (value) => (value * 100).toFixed(2) + "%";
+  const num = (value, digits = 4) =>
+    value === null || value === undefined || Number.isNaN(Number(value))
+      ? "n/a"
+      : Number(value).toFixed(digits);
   kpis.innerHTML = `
     <div class="kpi">Total particles<strong>${report.total_particles}</strong></div>
     <div class="kpi">Primary out<strong>${report.out_primary_particles}</strong></div>
@@ -223,6 +227,8 @@ function renderKpi(report) {
     <div class="kpi">Secondary out<strong>${report.out_secondary_particles}</strong></div>
     <div class="kpi">Transmission<strong>${pct(report.transmission_rate)}</strong></div>
     <div class="kpi">Stopping efficiency<strong>${pct(report.stopping_efficiency)}</strong></div>
+    <div class="kpi">Dose (Gy)<strong>${num(report.dose_gy, 6)}</strong></div>
+    <div class="kpi">LET (MeV*cm2/mg)<strong>${num(report.let_mev_cm2_mg, 4)}</strong></div>
   `;
 }
 
@@ -244,6 +250,30 @@ function renderLayerReport(report) {
     full.push("");
     full.push("Per-particle:");
     full.push(...particleLines);
+  }
+  if (report.dose_gy !== undefined || report.let_mev_cm2_mg !== undefined) {
+    full.push("");
+    full.push("Electronics:");
+    full.push(
+      `Dose: ${
+        report.dose_gy === null || report.dose_gy === undefined ? "n/a" : Number(report.dose_gy).toFixed(6)
+      } Gy (threshold: ${
+        report.dose_threshold_gy === null || report.dose_threshold_gy === undefined
+          ? "n/a"
+          : Number(report.dose_threshold_gy).toFixed(6)
+      } Gy, verdict: ${report.dose_verdict || "unknown"})`,
+    );
+    full.push(
+      `LET max: ${
+        report.let_mev_cm2_mg === null || report.let_mev_cm2_mg === undefined
+          ? "n/a"
+          : Number(report.let_mev_cm2_mg).toFixed(4)
+      } MeV*cm2/mg (threshold: ${
+        report.let_threshold_mev_cm2_mg === null || report.let_threshold_mev_cm2_mg === undefined
+          ? "n/a"
+          : Number(report.let_threshold_mev_cm2_mg).toFixed(4)
+      } MeV*cm2/mg, risk: ${report.let_verdict || "unknown"})`,
+    );
   }
   document.getElementById("layerReport").textContent = full.join("\n") || "No data";
 }
@@ -294,6 +324,8 @@ async function runSimulation() {
     world_z_mm: Number(document.getElementById("world_z").value),
     screen_xy_mm: Number(document.getElementById("screen_xy").value),
     first_screen_z_mm: Number(document.getElementById("first_z").value),
+    electronics_dose_threshold_gy: Number(document.getElementById("dose_threshold").value),
+    electronics_let_threshold_mev_cm2_mg: Number(document.getElementById("let_threshold").value),
     build_energy_plots: true,
     layers: readLayers(),
   };

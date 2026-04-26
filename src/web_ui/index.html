@@ -124,6 +124,8 @@
         <div><label>World Z (mm)</label><input id="world_z" type="number" value="500"></div>
         <div><label>Screen XY (mm)</label><input id="screen_xy" type="number" value="250"></div>
         <div><label>First Screen Z (mm)</label><input id="first_z" type="number" value="15"></div>
+        <div><label>Dose Threshold (Gy)</label><input id="dose_threshold" type="number" value="5" min="0" step="0.01"></div>
+        <div><label>LET Threshold (MeV*cm2/mg)</label><input id="let_threshold" type="number" value="1" min="0" step="0.01"></div>
       </div>
       <div class="btns" style="margin-top: 12px;">
         <button type="button" class="add" id="addParticleBtn" onclick="addParticleFromUi()">+ Add particle</button>

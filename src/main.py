@@ -220,14 +220,17 @@ class ScreenGeometry(g4.G4VUserDetectorConstruction):
 
         if electronics_thickness_mm > 0:
             electronics_material_name = getattr(self.cfg, "electronics_material", "G4_Si")
+            electronics_size_x_mm = getattr(self.cfg, "electronics_size_x_mm", 10.0)
+            electronics_size_y_mm = getattr(self.cfg, "electronics_size_y_mm", 10.0)
             electronics_material = nist.FindOrBuildMaterial(electronics_material_name)
             electronics_center_z = (
                 self.screens_end_z_mm + electronics_gap_mm + 0.5 * electronics_thickness_mm
             ) * g4.mm
+            electronics_center_y = 0.0
             electronics_solid = g4.G4Box(
                 "Electronics",
-                0.5 * screen_xy,
-                0.5 * screen_xy,
+                0.5 * electronics_size_x_mm * g4.mm,
+                0.5 * electronics_size_y_mm * g4.mm,
                 0.5 * electronics_thickness_mm * g4.mm
             )
             self.electronics_logical = g4.G4LogicalVolume(
@@ -237,7 +240,7 @@ class ScreenGeometry(g4.G4VUserDetectorConstruction):
             )
             g4.G4PVPlacement(
                 None,
-                g4.G4ThreeVector(0, 0, electronics_center_z),
+                g4.G4ThreeVector(0, electronics_center_y, electronics_center_z),
                 self.electronics_logical,
                 "Electronics",
                 self.logic_world,
@@ -249,12 +252,14 @@ class ScreenGeometry(g4.G4VUserDetectorConstruction):
                 "material": electronics_material_name,
                 "density_g_cm3": electronics_material.GetDensity() / (g4.g / g4.cm3),
                 "gap_mm": electronics_gap_mm,
+                "size_x_mm": electronics_size_x_mm,
+                "size_y_mm": electronics_size_y_mm,
                 "thickness_mm": electronics_thickness_mm,
-                "xy_size_mm": self.cfg.screen_xy_mm,
-                "volume_mm3": self.cfg.screen_xy_mm * self.cfg.screen_xy_mm * electronics_thickness_mm,
+                "xy_size_mm": max(electronics_size_x_mm, electronics_size_y_mm),
+                "volume_mm3": electronics_size_x_mm * electronics_size_y_mm * electronics_thickness_mm,
                 "mass_mg": (
-                    (self.cfg.screen_xy_mm / 10.0)
-                    * (self.cfg.screen_xy_mm / 10.0)
+                    (electronics_size_x_mm / 10.0)
+                    * (electronics_size_y_mm / 10.0)
                     * (electronics_thickness_mm / 10.0)
                     * (electronics_material.GetDensity() / (g4.g / g4.cm3))
                     * 1000.0
@@ -722,8 +727,10 @@ class SingleProcessSimulationRunner:
         geom = ScreenGeometry(data=data, screen_info=screen_info, cfg=cfg, tracks=tracks)
         geom._precomputed_layout = layout
         run_manager.SetUserInitialization(geom)
-        run_manager.SetUserInitialization(g4.FTFP_BERT())
-        
+        physics_list = g4.FTFP_BERT()
+        # physics_list.SetDefaultMaxStepLength(0.001 * g4.mm)
+        run_manager.SetUserInitialization(physics_list)
+        # run_manager.SetUserInitialization(g4.QGSP_BERT())
         # Определяем тип генератора
         if cfg.use_mixed_beam and len(cfg.particles) > 1:
             # Смешанный пучок
@@ -1426,6 +1433,8 @@ class SimulationRunner:
                 screen_xy_mm=cfg.screen_xy_mm,
                 first_screen_z_mm=cfg.first_screen_z_mm,
                 electronics_gap_mm=cfg.electronics_gap_mm,
+                electronics_size_x_mm=cfg.electronics_size_x_mm,
+                electronics_size_y_mm=cfg.electronics_size_y_mm,
                 electronics_thickness_mm=cfg.electronics_thickness_mm,
                 electronics_material=cfg.electronics_material,
                 electronics_let_threshold_mev_cm2_mg=cfg.electronics_let_threshold_mev_cm2_mg,
@@ -1705,15 +1714,15 @@ if __name__ == "__main__":
     Использовать для получения данных по task_id с сайта (раскоментировать строку)
     '''
     # data = ds.get_current_task_to_json(task_id)
-    events = 100
+    events = 600
     # Пример: Мульти-частичный последовательный режим
     cfg_multi = SimulationConfig(
         task_id=task_id,
         input_data=data,
         particles=[
-            ParticleConfig(name="He3", energy_mev=70.0),
-            ParticleConfig(name="alpha", energy_mev=70.0),
-            ParticleConfig(name="proton", energy_mev=70.0)
+            ParticleConfig(name="He3", energy_mev=40.0),
+            # ParticleConfig(name="alpha", energy_mev=40.0),
+            ParticleConfig(name="proton", energy_mev=40.0)
             # ParticleConfig(name="neutron", energy_mev=50.0)
             # ParticleConfig(name="e-", energy_mev=60.0)
         ],
@@ -1734,6 +1743,7 @@ if __name__ == "__main__":
 
     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     export_dir = f"out/simulation_visualization_{timestamp}"
+    tracks = result.tracks
 
     if cfg_multi.visualize:
         if result.particle_results:

@@ -46,6 +46,8 @@ class SimulationRequest(BaseModel):
     electronics_gap_mm: float = 0.1
     electronics_thickness_mm: float = 0.05
     electronics_material: str = "G4_Si"
+    electronics_dose_threshold_gy: float = 5.0
+    electronics_let_threshold_mev_cm2_mg: float = 1.0
     build_energy_plots: bool = True
 
 
@@ -79,6 +81,9 @@ def _build_report(result_dict: Dict[str, Any]) -> Dict[str, Any]:
 
     screen_info = result_dict.get("screen_info") or {}
     materials = screen_info.get("Materials") or []
+    energy_summary = result_dict.get("energy_summary") or {}
+    electronics_let = energy_summary.get("electronics_let") or {}
+    dose_assessment = electronics_let.get("dose_assessment") or {}
     layer_rows = []
     for idx, mat in enumerate(materials):
         layer_rows.append(
@@ -101,7 +106,13 @@ def _build_report(result_dict: Dict[str, Any]) -> Dict[str, Any]:
         "stopping_efficiency": stopping_eff,
         "layers": layer_rows,
         "electronics": screen_info.get("Electronics"),
-        "energy_summary": result_dict.get("energy_summary"),
+        "energy_summary": energy_summary,
+        "dose_gy": electronics_let.get("absorbed_dose_gy"),
+        "dose_threshold_gy": electronics_let.get("dose_threshold_gy"),
+        "dose_verdict": dose_assessment.get("verdict"),
+        "let_mev_cm2_mg": electronics_let.get("max_let_mev_cm2_mg"),
+        "let_threshold_mev_cm2_mg": electronics_let.get("threshold_mev_cm2_mg"),
+        "let_verdict": electronics_let.get("risk_level"),
         "particle_results": particle_results,
         "comparison": result_dict.get("comparison"),
     }
