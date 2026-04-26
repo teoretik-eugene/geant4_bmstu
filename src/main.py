@@ -14,6 +14,7 @@ import datetime
 import random
 import multiprocessing as mp
 from concurrent.futures import ProcessPoolExecutor, as_completed
+from pathlib import Path
 from simulations import ParticleConfig, SimulationConfig, SingleParticleResult, SimulationResult, SimulationGigaConfig
 from giga_tools import ScreenInfo
 from utils import compute_layout, is_primary
@@ -31,6 +32,67 @@ logging.basicConfig(
 
 _geant4_initialized = False
 
+
+def _configure_geant4_data_env() -> None:
+    """Populate required Geant4 dataset environment variables when possible."""
+    dataset_map = {
+        "G4ENSDFSTATEDATA": "G4ENSDFSTATE",
+        "G4LEVELGAMMADATA": "PhotonEvaporation",
+        "G4RADIOACTIVEDATA": "RadioactiveDecay",
+        "G4PARTICLEXSDATA": "G4PARTICLEXS",
+        "G4NEUTRONHPDATA": "G4NDL",
+        "G4LEDATA": "G4EMLOW",
+        "G4SAIDXSDATA": "G4SAIDDATA",
+        "G4REALSURFACEDATA": "RealSurface",
+        "G4ABLADATA": "G4ABLA",
+        "G4INCLDATA": "G4INCL",
+        "G4PIIDATA": "G4PII",
+        "G4TENDLDATA": "G4TENDL",
+    }
+
+    candidate_roots = []
+    geant4_data_env = os.getenv("GEANT4_DATA")
+    if geant4_data_env:
+        candidate_roots.append(Path(geant4_data_env))
+
+    candidate_roots.extend(
+        [
+            Path("/app/geant4/data"),
+            Path("/usr/local/share/Geant4/data"),
+            Path("/usr/local/share/geant4/data"),
+        ]
+    )
+
+    # Keep order while removing duplicates
+    unique_roots = []
+    seen = set()
+    for root in candidate_roots:
+        key = str(root)
+        if key not in seen:
+            seen.add(key)
+            unique_roots.append(root)
+
+    for env_name, dir_prefix in dataset_map.items():
+        if os.getenv(env_name):
+            continue
+
+        for root in unique_roots:
+            if not root.exists():
+                continue
+            matches = sorted(root.glob(f"{dir_prefix}*"))
+            if matches:
+                os.environ[env_name] = str(matches[-1])
+                break
+
+    # Fail fast with actionable diagnostics for the one dataset that triggered your error.
+    if not os.getenv("G4ENSDFSTATEDATA"):
+        roots_str = ", ".join(str(r) for r in unique_roots)
+        raise RuntimeError(
+            "Geant4 dataset path is not configured: G4ENSDFSTATEDATA is missing. "
+            f"Searched roots: {roots_str}. "
+            "Set GEANT4_DATA or G4ENSDFSTATEDATA explicitly."
+        )
+
 class TrackCollector:
     def __init__(self, enabled: bool = False) -> None:
         self.enabled = enabled
@@ -46,6 +108,8 @@ class TrackCollector:
         # }
         self._exit_energies = []    # энергии на выходе
         self._electronics_hits: Dict[Tuple[int, int], Dict[str, Any]] = {}
+        self._electronics_dose_gy_total: float = 0.0
+        self._electronics_dose_events: int = 0
     
     def add(self, event_id: int, track_id: int, pos: g4.G4ThreeVector, particle_type: str = None) -> None:
         if not self.enabled:
@@ -113,6 +177,16 @@ class TrackCollector:
             current_max = hit.get("max_let_mev_cm2_mg")
             hit["max_let_mev_cm2_mg"] = let_value if current_max is None else max(current_max, let_value)
 
+    def add_electronics_dose_event(self, dose_gy: float) -> None:
+        try:
+            dose_value = float(dose_gy)
+        except (TypeError, ValueError):
+            return
+        if dose_value < 0:
+            return
+        self._electronics_dose_gy_total += dose_value
+        self._electronics_dose_events += 1
+
     def get_particle_type(self, event_id: int, track_id: int) -> str:
         return self._particle_types.get((event_id, track_id), "unknown")
     
@@ -137,6 +211,14 @@ class TrackCollector:
         return list(self._electronics_hits.values())
 
     @property
+    def electronics_dose_gy_total(self):
+        return self._electronics_dose_gy_total
+
+    @property
+    def electronics_dose_events(self):
+        return self._electronics_dose_events
+
+    @property
     def data(self):
         return self._data
 
@@ -157,6 +239,7 @@ class ScreenGeometry(g4.G4VUserDetectorConstruction):
         self.logic_world = None
         self.screen_logicals = []
         self.electronics_logical = None
+        self.electronics_dose_collection_name = "ElectronicsMFD/DoseDeposit"
         self.screens_end_z_mm = cfg.first_screen_z_mm
         self._precomputed_layout: Optional[dict] = None
 
@@ -173,7 +256,7 @@ class ScreenGeometry(g4.G4VUserDetectorConstruction):
         half_world_z_mm = layout["half_world_z_mm"]
         first_screen_front_z_mm = layout["first_screen_front_z_mm"]
         electronics_gap_mm = layout.get("electronics_gap_mm", getattr(self.cfg, "electronics_gap_mm", 0.1))
-        electronics_thickness_mm_parameter = 0.05
+        electronics_thickness_mm_parameter = 0.5
         electronics_thickness_mm = layout.get("electronics_thickness_mm", getattr(self.cfg, "electronics_thickness_mm", 
                                                                                   electronics_thickness_mm_parameter))
 
@@ -220,8 +303,8 @@ class ScreenGeometry(g4.G4VUserDetectorConstruction):
 
         if electronics_thickness_mm > 0:
             electronics_material_name = getattr(self.cfg, "electronics_material", "G4_Si")
-            electronics_size_x_mm = getattr(self.cfg, "electronics_size_x_mm", 10.0)
-            electronics_size_y_mm = getattr(self.cfg, "electronics_size_y_mm", 10.0)
+            electronics_size_x_mm = getattr(self.cfg, "electronics_size_x_mm", 50.0)
+            electronics_size_y_mm = getattr(self.cfg, "electronics_size_y_mm", 50.0)
             electronics_material = nist.FindOrBuildMaterial(electronics_material_name)
             electronics_center_z = (
                 self.screens_end_z_mm + electronics_gap_mm + 0.5 * electronics_thickness_mm
@@ -238,6 +321,15 @@ class ScreenGeometry(g4.G4VUserDetectorConstruction):
                 electronics_material,
                 "Electronics"
             )
+            user_limits = g4.G4UserLimits(
+                0.001 * g4.mm,
+                1.0 * g4.s,
+                1.0 * g4.s,
+                0.001 * g4.mm,
+                0.001 * g4.MeV
+            )
+            self.electronics_logical.SetUserLimits(user_limits)
+            logging.info(f"mass of electronics {self.electronics_logical.GetMass()/g4.g}")
             g4.G4PVPlacement(
                 None,
                 g4.G4ThreeVector(0, electronics_center_y, electronics_center_z),
@@ -281,8 +373,17 @@ class ScreenGeometry(g4.G4VUserDetectorConstruction):
                 self.screen_info,
                 self.tracks
             )
+            electronics_mfd = g4.G4MultiFunctionalDetector("ElectronicsMFD")
+            electronics_mfd.RegisterPrimitive(g4.G4PSDoseDeposit("DoseDeposit", "Gy"))
+
+            electronics_multi_sd = g4.G4MultiSensitiveDetector("ElectronicsMultiSD")
+            electronics_multi_sd.AddSD(electronics_sd)
+            electronics_multi_sd.AddSD(electronics_mfd)
+
             sdm.AddNewDetector(electronics_sd)
-            self.electronics_logical.SetSensitiveDetector(electronics_sd)
+            sdm.AddNewDetector(electronics_mfd)
+            sdm.AddNewDetector(electronics_multi_sd)
+            self.electronics_logical.SetSensitiveDetector(electronics_multi_sd)
 
 # -----------------------------
 # Сенсоры
@@ -336,10 +437,10 @@ class ScreenSensitiveDetector(g4.G4VSensitiveDetector):
                     # Добавляем в статистику
                     if track.GetParentID() == 0:
                         self.screen_info["Materials"][idx]["Primary_stuck_count"] += 1
-                        logging.info(f"Primary track {particle} {track_id} (event {event_id}) stopped in {vol_name} at Z={z_mm:.2f} mm")
+                        # logging.info(f"Primary track {particle} {track_id} (event {event_id}) stopped in {vol_name} at Z={z_mm:.2f} mm")
                     else:
                         self.screen_info["Materials"][idx]["Secondary_stuck_count"] += 1
-                        logging.info(f"Secondary track {track_id} (event {event_id}) stopped in {vol_name} at Z={z_mm:.2f} mm")
+                        # logging.info(f"Secondary track {track_id} (event {event_id}) stopped in {vol_name} at Z={z_mm:.2f} mm")
 
                     # Помечаем трек как обработанный
                     self.stopped_tracks.add(track_key)
@@ -450,12 +551,33 @@ class ElectronicsSensitiveDetector(g4.G4VSensitiveDetector):
         return True
 
 class ScreenEventAction(g4.G4UserEventAction):
-    def __init__(self):
+    def __init__(self, tracks: Optional[TrackCollector] = None, dose_collection_name: Optional[str] = None):
         super().__init__()
         self.event_id = None
+        self.tracks = tracks
+        self.dose_collection_name = dose_collection_name
+        self._dose_collection_id = None
     def BeginOfEventAction(self, anEvent):
         self.event_id = anEvent.GetEventID()
     def EndOfEventAction(self, anEvent):
+        if self.tracks is not None and self.dose_collection_name:
+            try:
+                if self._dose_collection_id is None or self._dose_collection_id < 0:
+                    self._dose_collection_id = g4.G4SDManager.GetSDMpointer().GetCollectionID(
+                        self.dose_collection_name
+                    )
+
+                if self._dose_collection_id is not None and self._dose_collection_id >= 0:
+                    hce = anEvent.GetHCofThisEvent()
+                    if hce is not None:
+                        hc = hce.GetHC(self._dose_collection_id)
+                        dose_event_gy = 0.0
+                        if hc is not None:
+                            for _, value in hc:
+                                dose_event_gy += float(value)
+                        self.tracks.add_electronics_dose_event(dose_event_gy)
+            except Exception as exc:
+                logging.warning("Failed to read dose scorer collection '%s': %s", self.dose_collection_name, exc)
         self.event_id = None
 
 class ScreenSteppingAction(g4.G4UserSteppingAction):
@@ -528,7 +650,18 @@ class ScreenSteppingAction(g4.G4UserSteppingAction):
                     self.secondary_out.append(key)
 
 class ActionInitialization(g4.G4VUserActionInitialization):
-    def __init__(self, data, primary_out, secondary_out, particle_config, layout, tracks, current_particle, generator):
+    def __init__(
+        self,
+        data,
+        primary_out,
+        secondary_out,
+        particle_config,
+        layout,
+        tracks,
+        current_particle,
+        generator,
+        electronics_dose_collection_name: Optional[str] = None
+    ):
         super().__init__()
         self.data = data
         self.primary_out = primary_out
@@ -538,11 +671,15 @@ class ActionInitialization(g4.G4VUserActionInitialization):
         self.tracks = tracks
         self.current_particle = current_particle
         self.generator = generator
+        self.electronics_dose_collection_name = electronics_dose_collection_name
     
     def Build(self):
         self.SetUserAction(self.generator)
         
-        event_action = ScreenEventAction()
+        event_action = ScreenEventAction(
+            tracks=self.tracks,
+            dose_collection_name=self.electronics_dose_collection_name
+        )
         self.SetUserAction(event_action)
         self.SetUserAction(ScreenSteppingAction(
             self.primary_out,
@@ -713,6 +850,7 @@ class SingleProcessSimulationRunner:
     
     def run_single(self, cfg: SimulationConfig) -> SimulationResult:
         """Запускает одну симуляцию в отдельном процессе"""
+        _configure_geant4_data_env()
         data = self._load_input(cfg)
         layout = compute_layout(cfg, data)
         screen_info = {}
@@ -728,6 +866,7 @@ class SingleProcessSimulationRunner:
         geom._precomputed_layout = layout
         run_manager.SetUserInitialization(geom)
         physics_list = g4.FTFP_BERT()
+        # physics_list = g4.QBBC()
         # physics_list.SetDefaultMaxStepLength(0.001 * g4.mm)
         run_manager.SetUserInitialization(physics_list)
         # run_manager.SetUserInitialization(g4.QGSP_BERT())
@@ -758,7 +897,8 @@ class SingleProcessSimulationRunner:
             layout=layout,
             tracks=tracks,
             current_particle=current_particle,
-            generator=generator
+            generator=generator,
+            electronics_dose_collection_name=geom.electronics_dose_collection_name
         ))
         
         run_manager.Initialize()
@@ -776,10 +916,15 @@ class SingleProcessSimulationRunner:
             tracks.energy_profiles,
             tracks.exit_energies,
             layout,
+            events = cfg.events,
             electronics_hits=tracks.electronics_hits,
             electronics_info=screen_info.get("Electronics"),
             let_threshold_mev_cm2_mg=cfg.electronics_let_threshold_mev_cm2_mg,
-            dose_threshold_gy=cfg.electronics_dose_threshold_gy
+            dose_threshold_gy=cfg.electronics_dose_threshold_gy,
+            absorbed_dose_gy_override=(
+                tracks.electronics_dose_gy_total
+                if tracks.electronics_dose_events > 0 else None
+            )
         )
         logging.info(f'energy summary: {energy_summary}')
 
@@ -990,7 +1135,9 @@ def _compute_electronics_let_summary(
     electronics_hits: list,
     electronics_info: Optional[dict],
     threshold_mev_cm2_mg: float,
-    dose_threshold_gy: float
+    dose_threshold_gy: float,
+    events,
+    absorbed_dose_gy_override: Optional[float] = None
 ) -> dict:
     if not electronics_info:
         return {}
@@ -1023,7 +1170,7 @@ def _compute_electronics_let_summary(
             })
         except (TypeError, ValueError):
             continue
-
+    logging.info(f"valid hits len: {len(valid_hits)}")
     mean_let_values = [
         hit["mean_let_mev_cm2_mg"] for hit in valid_hits
         if hit["mean_let_mev_cm2_mg"] is not None
@@ -1054,12 +1201,19 @@ def _compute_electronics_let_summary(
         float(hit.get("edep_mev", 0.0) or 0.0)
         for hit in electronics_hits or []
     )
+    logging.info(f"deposited_energy_mev: {deposited_energy_mev}")
     mass_mg = float(electronics_info.get("mass_mg", 0.0) or 0.0)
     mass_kg = mass_mg * 1e-6 if mass_mg > 0 else 0.0
     absorbed_dose_gy = (
-        deposited_energy_mev * 1.602176634e-13 / mass_kg
-        if mass_kg > 0 else None
+        float(absorbed_dose_gy_override)
+        if absorbed_dose_gy_override is not None
+        else (
+            deposited_energy_mev * 1.602176634e-13 / mass_kg
+            if mass_kg > 0 else None
+        )
     )
+    dose_per_primary_gy = absorbed_dose_gy / events if events > 0 else None
+    logging.info(f"dose_per_primary_gy: {dose_per_primary_gy}")
     logging.info(f"deposited_energy_mev: {deposited_energy_mev}")
     logging.info(f"absorbed_dose_gy: {absorbed_dose_gy}")
     dose_risk = _classify_dose_risk(
@@ -1088,6 +1242,7 @@ def _compute_electronics_let_summary(
         "mass_mg": mass_mg,
         "deposited_energy_mev": deposited_energy_mev,
         "absorbed_dose_gy": absorbed_dose_gy,
+        "dose_source": "g4_ps_dose_deposit" if absorbed_dose_gy_override is not None else "manual_edep_over_mass",
         "dose_threshold_gy": dose_threshold_gy,
         "dose_assessment": {
             "threshold_gy": dose_threshold_gy,
@@ -1130,10 +1285,12 @@ def _compute_energy_summary(
     energy_profiles: dict,
     exit_energies: list,
     layout: dict,
+    events: int,
     electronics_hits: Optional[list] = None,
     electronics_info: Optional[dict] = None,
     let_threshold_mev_cm2_mg: float = 1.0,
-    dose_threshold_gy: float = 5.0
+    dose_threshold_gy: float = 5.0,
+    absorbed_dose_gy_override: Optional[float] = None
 ) -> dict:
         """Вычисляет сводную статистику по энергии.
         
@@ -1197,7 +1354,9 @@ def _compute_energy_summary(
             electronics_hits=electronics_hits or [],
             electronics_info=electronics_info,
             threshold_mev_cm2_mg=let_threshold_mev_cm2_mg,
-            dose_threshold_gy=dose_threshold_gy
+            dose_threshold_gy=dose_threshold_gy,
+            events=events,
+            absorbed_dose_gy_override=absorbed_dose_gy_override
         )
 
         # Статистика по первичным частицам
@@ -1418,6 +1577,8 @@ class SimulationRunner:
         all_electronics_hits = []
         all_screen_info = None
         all_energy_summary = {}
+        all_absorbed_dose_gy = 0.0
+        has_absorbed_dose_gy = False
 
         logging.info(f"simulation config: {cfg}")
         # Создаем конфиги для каждой частицы
@@ -1504,6 +1665,14 @@ class SimulationRunner:
 
                     if "energy_summary" in result_dict and result_dict["energy_summary"]:
                         logging.info(f'energy_summary: {result_dict["energy_summary"]}')
+                        electronics_let = (result_dict.get("energy_summary") or {}).get("electronics_let") or {}
+                        dose_value = electronics_let.get("absorbed_dose_gy")
+                        if dose_value is not None:
+                            try:
+                                all_absorbed_dose_gy += float(dose_value)
+                                has_absorbed_dose_gy = True
+                            except (TypeError, ValueError):
+                                pass
 
                     res_screen = result_dict.get("screen_info", {})
                     res_mats = res_screen.get("Materials", [])
@@ -1581,7 +1750,9 @@ class SimulationRunner:
             electronics_hits=all_electronics_hits,
             electronics_info=(all_screen_info or {}).get("Electronics"),
             let_threshold_mev_cm2_mg=cfg.electronics_let_threshold_mev_cm2_mg,
-            dose_threshold_gy=cfg.electronics_dose_threshold_gy
+            dose_threshold_gy=cfg.electronics_dose_threshold_gy,
+            events=cfg.events,
+            absorbed_dose_gy_override=(all_absorbed_dose_gy if has_absorbed_dose_gy else None)
         )
         logging.info(f'res emergy summary: {energy_summary}')
 
@@ -1678,21 +1849,6 @@ if __name__ == "__main__":
             "Description": "Экран состоит из двух слоев: W и Ti.",
             "Materials": [
                 {
-                    "Name": "Al",
-                    "Description": "Алюминий (Al) толщиной 1000 мкм",
-                    "Width": 3000.0,
-                    "Elements": [
-                        {
-                            "Name": "Титан",
-                            "Symbol": "Ti",
-                            "Atomic_number": 22,
-                            "Standard_atomic_weight": 47.87,
-                            "Density": 4.5,
-                            "Percentage": 100.0
-                        }
-                    ]
-                },
-                {
                     "Name": "W",
                     "Description": "Вольфрам (W) толщиной 2000 мкм",
                     "Width": 2000.0,
@@ -1706,6 +1862,21 @@ if __name__ == "__main__":
                             "Percentage": 100.0
                         }
                     ]
+                },
+                {
+                    "Name": "Cu",
+                    "Description": "Cu",
+                    "Width": 2000.0,
+                    "Elements": [
+                        {
+                            "Name": "Медь",
+                            "Symbol": "Cu",
+                            "Atomic_number": 29,
+                            "Standard_atomic_weight": 63.546,
+                            "Density": 8.92,
+                            "Percentage": 100.0
+                        }
+                    ]
                 }
             ]
         }
@@ -1714,22 +1885,23 @@ if __name__ == "__main__":
     Использовать для получения данных по task_id с сайта (раскоментировать строку)
     '''
     # data = ds.get_current_task_to_json(task_id)
-    events = 600
+    events = 1_000
     # Пример: Мульти-частичный последовательный режим
     cfg_multi = SimulationConfig(
         task_id=task_id,
         input_data=data,
         particles=[
             ParticleConfig(name="He3", energy_mev=40.0),
+            # ParticleConfig(name="e-", energy_mev=60.0),
+            # ParticleConfig(name="gamma", energy_mev=60.0),
             # ParticleConfig(name="alpha", energy_mev=40.0),
             ParticleConfig(name="proton", energy_mev=40.0)
             # ParticleConfig(name="neutron", energy_mev=50.0)
-            # ParticleConfig(name="e-", energy_mev=60.0)
         ],
         events=events,
         collect_tracks=True,
         visualize=True,
-        use_mixed_beam=False  # Последовательные запуски в отдельных процессах
+        use_mixed_beam=False  
     )
     
     runner = SimulationRunner()
