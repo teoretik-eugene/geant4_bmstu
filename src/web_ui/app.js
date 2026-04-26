@@ -35,8 +35,7 @@ let layerCounter = 0;
 let availableParticles = ["He3", "e-", "proton", "alpha", "neutron", "gamma"];
 let defaultParticle = "He3";
 const defaultBeamParticles = [
-  { name: "He3", energy_mev: 40, weight: 1 },
-  { name: "proton", energy_mev: 40, weight: 1 },
+  { name: "He3", energy_mev: 40, weight: 1 }
 ];
 
 function setStatus(text, ok = true) {
@@ -359,5 +358,5 @@ if (document.readyState === "loading") {
 }
 
 // Fallback handlers for inline onclick (more robust across page cache/reload issues)
-window.addParticleFromUi = () => addParticleRow();
-window.removeParticleFromUi = () => removeParticleRow();
+// window.addParticleFromUi = () => addParticleRow();
+// window.removeParticleFromUi = () => removeParticleRow();
