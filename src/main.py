@@ -218,14 +218,6 @@ class TrackCollector:
     def electronics_dose_events(self):
         return self._electronics_dose_events
 
-    @property
-    def data(self):
-        return self._data
-
-    @property
-    def particle_types(self):
-        return self._particle_types
-
 # -----------------------------
 # Геометрия
 # -----------------------------
@@ -286,8 +278,7 @@ class ScreenGeometry(g4.G4VUserDetectorConstruction):
 
         world_xy_mm_local = max(self.cfg.world_xy_mm, self.cfg.screen_xy_mm + 50.0)
         solid_world = g4.G4Box("World", 0.5 * world_xy_mm_local * g4.mm, 0.5 * world_xy_mm_local * g4.mm, 0.5 * world_z_mm_local * g4.mm)
-        
-        self.logic_world = g4.G4LogicalVolume(solid_world, nist.FindOrBuildMaterial("G4_AIR"), "World")
+        self.logic_world = g4.G4LogicalVolume(solid_world, nist.FindOrBuildMaterial("G4_Galactic"), "World")
         phys_world = g4.G4PVPlacement(None, g4.G4ThreeVector(), self.logic_world, "World", None, False, 0, check_overlaps)
         z_cursor = first_screen_front_z_mm * g4.mm
         screen_xy = self.cfg.screen_xy_mm * g4.mm
@@ -329,7 +320,7 @@ class ScreenGeometry(g4.G4VUserDetectorConstruction):
                 0.001 * g4.MeV
             )
             self.electronics_logical.SetUserLimits(user_limits)
-            logging.info(f"mass of electronics {self.electronics_logical.GetMass()/g4.g}")
+            # logging.info(f"mass of electronics {self.electronics_logical.GetMass()/g4.g}")
             g4.G4PVPlacement(
                 None,
                 g4.G4ThreeVector(0, electronics_center_y, electronics_center_z),
@@ -359,6 +350,7 @@ class ScreenGeometry(g4.G4VUserDetectorConstruction):
                 "z_start_mm": self.screens_end_z_mm + electronics_gap_mm,
                 "z_end_mm": self.screens_end_z_mm + electronics_gap_mm + electronics_thickness_mm
             }
+            logging.info(f"mass of electronics: {self.screen_info['Electronics']['mass_mg']}")
         return phys_world
 
     def ConstructSDandField(self):
@@ -507,9 +499,9 @@ class ElectronicsSensitiveDetector(g4.G4VSensitiveDetector):
                     material
                 )
                 dedx_mev_per_mm = dedx_internal / (g4.MeV / g4.mm)
-                logging.info(f"dedx_mev_per_mm: {dedx_mev_per_mm}")
+                # logging.info(f"dedx_mev_per_mm: {dedx_mev_per_mm}")
                 let_step_mev_cm2_mg = dedx_mev_per_mm / (density_g_cm3 * 100.0)
-                logging.info(f"let_step_mev_cm2_mg: {let_step_mev_cm2_mg}")
+                # logging.info(f"let_step_mev_cm2_mg: {let_step_mev_cm2_mg}")
             except Exception as exc:
                 logging.warning(
                     "G4EmCalculator LET failed for particle=%s, energy=%.6f MeV: %s",
@@ -1851,7 +1843,7 @@ if __name__ == "__main__":
                 {
                     "Name": "W",
                     "Description": "Вольфрам (W) толщиной 2000 мкм",
-                    "Width": 2000.0,
+                    "Width": 3000.0,
                     "Elements": [
                         {
                             "Name": "Вольфрам",
@@ -1891,11 +1883,11 @@ if __name__ == "__main__":
         task_id=task_id,
         input_data=data,
         particles=[
-            ParticleConfig(name="He3", energy_mev=40.0),
-            # ParticleConfig(name="e-", energy_mev=60.0),
+            ParticleConfig(name="He3", energy_mev=30.0),
+            # ParticleConfig(name="e-", energy_mev=50.0),
             # ParticleConfig(name="gamma", energy_mev=60.0),
-            # ParticleConfig(name="alpha", energy_mev=40.0),
-            ParticleConfig(name="proton", energy_mev=40.0)
+            ParticleConfig(name="alpha", energy_mev=70.0),
+            ParticleConfig(name="proton", energy_mev=30.0)
             # ParticleConfig(name="neutron", energy_mev=50.0)
         ],
         events=events,
