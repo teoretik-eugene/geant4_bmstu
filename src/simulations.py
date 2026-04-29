@@ -116,7 +116,22 @@ class SimulationResult:
             d["tracks"] = {f"{k[0]}:{k[1]}": v for k, v in self.tracks.items()}
 
         if self.exit_energies is not None:
-            d["exit_energies"] = [float(e) for e in self.exit_energies]
+            serialized = []
+            for e in self.exit_energies:
+                if isinstance(e, dict):
+                    serialized.append({
+                        "energy_mev":   float(e.get("energy_mev", 0.0)),
+                        "is_primary":   bool(e.get("is_primary", True)),
+                        "particle_type": str(e.get("particle_type", "unknown")),
+                    })
+                else:
+                    # обратная совместимость: просто число
+                    serialized.append({
+                        "energy_mev":   float(e),
+                        "is_primary":   True,
+                        "particle_type": "unknown",
+                    })
+            d["exit_energies"] = serialized
 
         if self.electronics_hits is not None:
             d["electronics_hits"] = self.electronics_hits

@@ -106,7 +106,7 @@ class TrackCollector:
         #     "particle": str,
         #     "points": [(z, E)]
         # }
-        self._exit_energies = []    # энергии на выходе
+        self._exit_energies = []    # энергии на выходе: список dict {energy_mev, is_primary, particle_type}
         self._electronics_hits: Dict[Tuple[int, int], Dict[str, Any]] = {}
         self._electronics_dose_gy_total: float = 0.0
         self._electronics_dose_events: int = 0
@@ -129,9 +129,13 @@ class TrackCollector:
             }
 
         self._energy_profiles[key]["points"].append((z, energy))
-    
-    def add_exit_energy(self, energy):
-        self._exit_energies.append(energy)
+
+    def add_exit_energy(self, energy: float, is_primary: bool = True, particle_type: str = "unknown") -> None:
+        self._exit_energies.append({
+            "energy_mev": float(energy),
+            "is_primary": is_primary,
+            "particle_type": particle_type
+        })
 
     def add_electronics_step(
         self,
@@ -625,20 +629,29 @@ class ScreenSteppingAction(g4.G4UserSteppingAction):
                 z=z_pos,
                 energy=kin_energy
             )
-        
+
         if self.event_action.event_id is not None:
             self.tracks.add(self.event_action.event_id, track.GetTrackID(), pos, particle_name)
-        
+
         if pre_z_pos <= self.screens_end_z_mm < z_pos:
             key = (self.event_action.event_id or -1, track.GetTrackID())
+            exit_energy_mev = track.GetKineticEnergy() / g4.MeV
 
             if track.GetTrackID() == 1:
                 if key not in self.primary_out:
-                    self.tracks.add_exit_energy(track.GetKineticEnergy() / g4.MeV)
+                    self.tracks.add_exit_energy(
+                        exit_energy_mev,
+                        is_primary=True,
+                        particle_type=particle_name
+                    )
                     self.primary_out.append(key)
             else:
                 if key not in self.secondary_out:
-                    self.tracks.add_exit_energy(track.GetKineticEnergy() / g4.MeV)
+                    self.tracks.add_exit_energy(
+                        exit_energy_mev,
+                        is_primary=False,
+                        particle_type=particle_name
+                    )
                     self.secondary_out.append(key)
 
 class ActionInitialization(g4.G4VUserActionInitialization):
@@ -1284,268 +1297,417 @@ def _compute_energy_summary(
     dose_threshold_gy: float = 5.0,
     absorbed_dose_gy_override: Optional[float] = None
 ) -> dict:
-        """Вычисляет сводную статистику по энергии.
-        
-        Ключевые определения:
-        - exited_screen: частица вышла ЗА ЗАДНЮЮ границу экрана (last_z > screens_end_z_mm)
-        - stopped_in_screen: остановилась ВНУТРИ материала экрана
-        - backscattered: улетела НАЗАД (last_z < first_screen_front_z_mm)
-        - absorbed_before_screen: вторичная частица, остановившаяся ДО экрана (в вакууме)
-        """
-        if not energy_profiles:
-            energy_profiles = {}
+    """Вычисляет сводную статистику по энергии.
 
-        first_z = layout.get("first_screen_front_z_mm", 0)
-        end_z = layout.get("screens_end_z_mm", 0)
-        screen_thickness = end_z - first_z
-        thicknesses = layout.get("thicknesses_mm", [])
+    Ключевые определения:
+    - exited_screen    : частица вышла ЗА ЗАДНЮЮ границу экрана (last_z > end_z)
+    - stopped_in_screen: остановилась ВНУТРИ материала экрана (e_end < 1 кэВ и first_z <= last_z <= end_z)
+    - backscattered    : улетела НАЗАД (last_z < first_z)
+    - absorbed_before  : вторичная, остановившаяся ДО экрана (в вакууме)
 
-        exit_energies_float = []
-        if exit_energies:
-            for e in exit_energies:
-                try:
-                    exit_energies_float.append(float(e))
-                except (ValueError, TypeError):
-                    logging.warning(f"Invalid energy value: {e}, skipping")
+    exit_energies — список dict {energy_mev, is_primary, particle_type},
+    что позволяет раздельно анализировать первичные и вторичные.
+    """
+    if not energy_profiles:
+        energy_profiles = {}
 
-        assessment_energy_threshold_mev = 10.0
-        assessment_max_allowed_fraction = 0.1
-        exit_above_threshold_count = sum(
-            1 for energy in exit_energies_float
-            if energy >= assessment_energy_threshold_mev
-        )
-        exit_total_count = len(exit_energies_float)
-        exit_above_threshold_fraction = (
-            exit_above_threshold_count / exit_total_count
-            if exit_total_count > 0 else 0.0
-        )
-        screen_ineffective = exit_above_threshold_fraction > assessment_max_allowed_fraction
+    first_z    = layout.get("first_screen_front_z_mm", 0)
+    end_z      = layout.get("screens_end_z_mm", 0)
+    screen_thickness = end_z - first_z
+    thicknesses = layout.get("thicknesses_mm", [])
 
-        if exit_total_count == 0:
-            assessment_verdict = "effective"
-            assessment_reason = (
-                "Выходное излучение за экраном не зарегистрировано, "
-                "по текущему критерию экран считается эффективным."
-            )
-        elif screen_ineffective:
-            assessment_verdict = "ineffective"
-            assessment_reason = (
-                f"Доля выходных частиц с энергией не ниже {assessment_energy_threshold_mev:.1f} МэВ "
-                f"составляет {exit_above_threshold_fraction * 100:.1f}%, что превышает порог "
-                f"{assessment_max_allowed_fraction * 100:.1f}%."
-            )
+    # ------------------------------------------------------------------ #
+    # 1. Разбор exit_energies на первичные / вторичные                    #
+    # ------------------------------------------------------------------ #
+    primary_exit_energies: List[float]     = []
+    secondary_exit_energies: List[float]   = []
+    exit_by_particle_type: Dict[str, List[float]] = {}
+
+    for item in (exit_energies or []):
+        try:
+            if isinstance(item, dict):
+                e_mev        = float(item["energy_mev"])
+                is_prim      = bool(item.get("is_primary", True))
+                ptype        = str(item.get("particle_type", "unknown"))
+            else:
+                # обратная совместимость: просто число
+                e_mev   = float(item)
+                is_prim = True
+                ptype   = "unknown"
+        except (TypeError, ValueError, KeyError):
+            logging.warning(f"Invalid exit_energy item: {item}, skipping")
+            continue
+
+        if is_prim:
+            primary_exit_energies.append(e_mev)
         else:
-            assessment_verdict = "effective"
-            assessment_reason = (
-                f"Доля выходных частиц с энергией не ниже {assessment_energy_threshold_mev:.1f} МэВ "
-                f"составляет {exit_above_threshold_fraction * 100:.1f}%, что не превышает порог "
-                f"{assessment_max_allowed_fraction * 100:.1f}%."
-            )
+            secondary_exit_energies.append(e_mev)
+        exit_by_particle_type.setdefault(ptype, []).append(e_mev)
 
-        electronics_let = _compute_electronics_let_summary(
-            electronics_hits=electronics_hits or [],
-            electronics_info=electronics_info,
-            threshold_mev_cm2_mg=let_threshold_mev_cm2_mg,
-            dose_threshold_gy=dose_threshold_gy,
-            events=events,
-            absorbed_dose_gy_override=absorbed_dose_gy_override
-        )
+    all_exit_energies_flat = primary_exit_energies + secondary_exit_energies
 
-        # Статистика по первичным частицам
-        primary_profiles = [
-            p for p in energy_profiles.values()
-            if p.get("parent_id", 0) == 0
-        ]
+    # ------------------------------------------------------------------ #
+    # 2. Коэффициент ослабления флюенса (Fluence Attenuation Factor)      #
+    #    FAF = N_primary_exited / N_events                                #
+    #    Чем меньше FAF, тем лучше экран.                                 #
+    # ------------------------------------------------------------------ #
+    n_primary_exited   = len(primary_exit_energies)
+    n_secondary_exited = len(secondary_exit_energies)
+    fluence_attenuation_factor   = n_primary_exited / events if events > 0 else 0.0
+    fluence_attenuation_coeff    = 1.0 - fluence_attenuation_factor   # == stopping efficiency
 
-        # Статистика по вторичным частицам
-        secondary_profiles = [
-            p for p in energy_profiles.values()
-            if p.get("parent_id", 0) != 0
-        ]
+    # ------------------------------------------------------------------ #
+    # 3. Остаточная энергия прошедших первичных частиц                    #
+    # ------------------------------------------------------------------ #
+    mean_primary_exit_energy   = (
+        sum(primary_exit_energies) / len(primary_exit_energies)
+        if primary_exit_energies else None
+    )
+    max_primary_exit_energy    = max(primary_exit_energies)  if primary_exit_energies else None
+    min_primary_exit_energy    = min(primary_exit_energies)  if primary_exit_energies else None
 
-        # Первичные
-        stopped_primary = 0
-        exited_primary = 0
-        backscattered_primary = 0
-        energy_loss_primary = []
-        stopped_primary_by_material = {}
-        exited_primary_initial_energies = []
-        exited_primary_final_energies = []
+    mean_secondary_exit_energy = (
+        sum(secondary_exit_energies) / len(secondary_exit_energies)
+        if secondary_exit_energies else None
+    )
 
-        # Вторичные
-        stopped_secondary = 0
-        exited_secondary = 0
-        backscattered_secondary = 0
-        absorbed_before_secondary = 0
-        energy_loss_secondary = []
-        stopped_secondary_by_material = {}
-
-        for profile in primary_profiles:
-            points = profile.get("points", [])
-            if len(points) >= 2:
-                try:
-                    e_start = float(points[0][1])
-                    e_end = float(points[-1][1])
-                    z_last = float(points[-1][0])
-                    energy_loss_primary.append(e_start - e_end)
-
-                    # 1. Вышла за экран (Z > end_z)
-                    if z_last > end_z:
-                        exited_primary += 1
-                        exited_primary_initial_energies.append(e_start)
-                        exited_primary_final_energies.append(e_end)
-                    # 2. Улетела назад (Z < first_z)
-                    elif z_last < first_z:
-                        backscattered_primary += 1
-                    # 3. Остановилась ВНУТРИ экрана
-                    elif e_end < 0.001:
-                        stopped_primary += 1
-                        mat_idx = _find_stopped_particle_material(points, first_z, thicknesses)
-                        if mat_idx >= 0:
-                            stopped_primary_by_material[mat_idx] = stopped_primary_by_material.get(mat_idx, 0) + 1
-                except (ValueError, TypeError, IndexError):
-                    continue
-
-        for profile in secondary_profiles:
-            points = profile.get("points", [])
-            if len(points) >= 2:
-                try:
-                    e_start = float(points[0][1])
-                    e_end = float(points[-1][1])
-                    z_last = float(points[-1][0])
-                    energy_loss_secondary.append(e_start - e_end)
-
-                    # 1. Вышла за экран (Z > end_z)
-                    if z_last > end_z:
-                        exited_secondary += 1
-                    # 2. Улетела назад (Z < first_z)
-                    elif z_last < first_z:
-                        backscattered_secondary += 1
-                        # Если остановилась — считаем как absorbed_before
-                        if e_end < 0.001:
-                            absorbed_before_secondary += 1
-                    # 3. Остановилась ВНУТРИ экрана
-                    elif e_end < 0.001:
-                        stopped_secondary += 1
-                        mat_idx = _find_stopped_particle_material(points, first_z, thicknesses)
-                        if mat_idx >= 0:
-                            stopped_secondary_by_material[mat_idx] = stopped_secondary_by_material.get(mat_idx, 0) + 1
-                except (ValueError, TypeError, IndexError):
-                    continue
-
-        mean_initial_exit_primary_energy = (
-            sum(exited_primary_initial_energies) / len(exited_primary_initial_energies)
-            if exited_primary_initial_energies else None
-        )
-        mean_final_exit_primary_energy = (
-            sum(exited_primary_final_energies) / len(exited_primary_final_energies)
-            if exited_primary_final_energies else None
-        )
-        transmission_energy_attenuation = (
-            1.0 - (mean_final_exit_primary_energy / mean_initial_exit_primary_energy)
-            if mean_initial_exit_primary_energy and mean_initial_exit_primary_energy > 0
-            and mean_final_exit_primary_energy is not None
-            else None
-        )
-        dose_assessment = electronics_let.get("dose_assessment", {})
-        event_upset_risk = electronics_let.get("event_upset_risk", {})
-        screen_protected = (
-            assessment_verdict == "effective"
-            and dose_assessment.get("is_protected", False)
-            and not electronics_let.get("is_dangerous", False)
-            and event_upset_risk.get("upset_events_count", 0) == 0
-        )
-        if screen_protected:
-            protection_reason = (
-                "Экран признан защитным: доля опасного выходного излучения ниже порога, "
-                "поглощенная доза в электронике ниже порога, опасный LET не зарегистрирован, "
-                "event upset risk не выявлен."
-            )
-        else:
-            failed_criteria = []
-            if assessment_verdict != "effective":
-                failed_criteria.append("по доле выходного излучения")
-            if not dose_assessment.get("is_protected", False):
-                failed_criteria.append("по поглощенной дозе")
-            if electronics_let.get("is_dangerous", False):
-                failed_criteria.append("по LET")
-            if event_upset_risk.get("upset_events_count", 0) > 0:
-                failed_criteria.append("по event upset risk")
-            protection_reason = (
-                "Экран не признан защитным " + ", ".join(failed_criteria) + "."
-                if failed_criteria else
-                "Экран не признан защитным."
-            )
-
-        return {
-            "primary_particles": {
-                "total": len(primary_profiles),
-                "stopped_in_screen": stopped_primary,
-                "stopped_by_material": stopped_primary_by_material,
-                "exited_screen": exited_primary,
-                "backscattered": backscattered_primary,
-                "stopping_fraction": stopped_primary / len(primary_profiles) if primary_profiles else 0,
-                "mean_initial_energy_exited_mev": mean_initial_exit_primary_energy,
-                "mean_exit_energy_mev": mean_final_exit_primary_energy,
-                "energy_attenuation_fraction": transmission_energy_attenuation,
-                "energy_attenuation_percent": (
-                    transmission_energy_attenuation * 100.0
-                    if transmission_energy_attenuation is not None else None
-                ),
-                "avg_energy_loss": sum(energy_loss_primary) / len(energy_loss_primary) if energy_loss_primary else 0,
-                "max_energy_loss": max(energy_loss_primary) if energy_loss_primary else 0,
-                "min_energy_loss": min(energy_loss_primary) if energy_loss_primary else 0
-            },
-            "secondary_particles": {
-                "total": len(secondary_profiles),
-                "stopped_in_screen": stopped_secondary,
-                "stopped_by_material": stopped_secondary_by_material,
-                "exited_screen": exited_secondary,
-                "backscattered": backscattered_secondary,
-                "absorbed_before_screen": absorbed_before_secondary,
-                "stopping_fraction": stopped_secondary / len(secondary_profiles) if secondary_profiles else 0,
-                "avg_energy_loss": sum(energy_loss_secondary) / len(energy_loss_secondary) if energy_loss_secondary else 0
-            },
-            "screen": {
-                "thickness_mm": screen_thickness,
-                "first_z_mm": first_z,
-                "end_z_mm": end_z
-            },
-            "exit_energies": {
-                "count": len(exit_energies_float),
-                "min": min(exit_energies_float) if exit_energies_float else None,
-                "max": max(exit_energies_float) if exit_energies_float else None,
-                "mean": sum(exit_energies_float) / len(exit_energies_float) if exit_energies_float else None
-            },
-            "shield_assessment": {
-                "criterion": "exit_radiation_fraction_above_energy_threshold",
-                "threshold_energy_mev": assessment_energy_threshold_mev,
-                "max_allowed_fraction": assessment_max_allowed_fraction,
-                "max_allowed_percent": assessment_max_allowed_fraction * 100,
-                "exit_particles_total": exit_total_count,
-                "exit_particles_above_threshold": exit_above_threshold_count,
-                "fraction_above_threshold": exit_above_threshold_fraction,
-                "percent_above_threshold": exit_above_threshold_fraction * 100,
-                "is_effective": not screen_ineffective,
-                "is_ineffective": screen_ineffective,
-                "verdict": assessment_verdict,
-                "reason": assessment_reason
-            },
-            "electronics_let": electronics_let,
-            "screen_protection_report": {
-                "is_protected": screen_protected,
-                "verdict": "protected" if screen_protected else "not_protected",
-                "reason": protection_reason,
-                "criteria": {
-                    "exit_radiation": assessment_verdict,
-                    "dose": dose_assessment.get("verdict", "unknown"),
-                    "let": "safe" if not electronics_let.get("is_dangerous", False) else "dangerous",
-                    "event_upset_risk": (
-                        "safe" if event_upset_risk.get("upset_events_count", 0) == 0 else "dangerous"
-                    )
-                }
-            }
+    # Разбивка по типу частицы
+    exit_by_type_summary: Dict[str, Any] = {}
+    for ptype, energies in exit_by_particle_type.items():
+        exit_by_type_summary[ptype] = {
+            "count":      len(energies),
+            "mean_mev":   sum(energies) / len(energies),
+            "max_mev":    max(energies),
+            "min_mev":    min(energies),
         }
+
+    # ------------------------------------------------------------------ #
+    # 4. Анализ треков: остановки, выходы, пик Брэгга                     #
+    # ------------------------------------------------------------------ #
+    primary_profiles   = [p for p in energy_profiles.values() if p.get("parent_id", 0) == 0]
+    secondary_profiles = [p for p in energy_profiles.values() if p.get("parent_id", 0) != 0]
+
+    # --- первичные ---
+    stopped_primary             = 0
+    exited_primary              = 0
+    backscattered_primary       = 0
+    stopped_primary_by_material: Dict[int, int] = {}
+    exited_primary_initial_energies: List[float] = []
+    exited_primary_final_energies:   List[float] = []
+    energy_loss_primary:             List[float] = []
+    # Bragg peak analysis
+    bragg_stopped_inside  = 0   # пик внутри экрана — хорошо
+    bragg_stopped_after   = 0   # пик ЗА экраном — экран тонкий
+    bragg_stopped_before  = 0   # обратное рассеяние
+    bragg_stop_z_list:    List[float] = []
+
+    for profile in primary_profiles:
+        points = profile.get("points", [])
+        if len(points) < 2:
+            continue
+        try:
+            e_start = float(points[0][1])
+            e_end   = float(points[-1][1])
+            z_last  = float(points[-1][0])
+            energy_loss_primary.append(e_start - e_end)
+
+            if z_last > end_z:
+                exited_primary += 1
+                exited_primary_initial_energies.append(e_start)
+                exited_primary_final_energies.append(e_end)
+                bragg_stopped_after += 1          # дошла до конца экрана и пошла дальше
+            elif z_last < first_z:
+                backscattered_primary += 1
+                bragg_stopped_before += 1
+            else:   # first_z <= z_last <= end_z
+                if e_end < 0.001:   # остановилась (< 1 кэВ)
+                    stopped_primary += 1
+                    bragg_stopped_inside += 1
+                    bragg_stop_z_list.append(z_last)
+                    mat_idx = _find_stopped_particle_material(points, first_z, thicknesses)
+                    if mat_idx >= 0:
+                        stopped_primary_by_material[mat_idx] = (
+                            stopped_primary_by_material.get(mat_idx, 0) + 1
+                        )
+        except (ValueError, TypeError, IndexError):
+            continue
+
+    # --- вторичные ---
+    stopped_secondary             = 0
+    exited_secondary              = 0
+    backscattered_secondary       = 0
+    absorbed_before_secondary     = 0
+    stopped_secondary_by_material: Dict[int, int] = {}
+    energy_loss_secondary:         List[float] = []
+
+    for profile in secondary_profiles:
+        points = profile.get("points", [])
+        if len(points) < 2:
+            continue
+        try:
+            e_start = float(points[0][1])
+            e_end   = float(points[-1][1])
+            z_last  = float(points[-1][0])
+            energy_loss_secondary.append(e_start - e_end)
+
+            if z_last > end_z:
+                exited_secondary += 1
+            elif z_last < first_z:
+                backscattered_secondary += 1
+                if e_end < 0.001:
+                    absorbed_before_secondary += 1
+            else:
+                if e_end < 0.001:
+                    stopped_secondary += 1
+                    mat_idx = _find_stopped_particle_material(points, first_z, thicknesses)
+                    if mat_idx >= 0:
+                        stopped_secondary_by_material[mat_idx] = (
+                            stopped_secondary_by_material.get(mat_idx, 0) + 1
+                        )
+        except (ValueError, TypeError, IndexError):
+            continue
+
+    # ------------------------------------------------------------------ #
+    # 5. Энергетическое ослабление первичных (из треков)                  #
+    # ------------------------------------------------------------------ #
+    mean_initial_exit_primary_energy = (
+        sum(exited_primary_initial_energies) / len(exited_primary_initial_energies)
+        if exited_primary_initial_energies else None
+    )
+    mean_final_exit_primary_energy = (
+        sum(exited_primary_final_energies) / len(exited_primary_final_energies)
+        if exited_primary_final_energies else None
+    )
+    # Коэффициент ослабления энергии прошедших частиц
+    # (насколько экран снизил энергию тех, кто всё-таки прошёл)
+    energy_attenuation_fraction = (
+        1.0 - (mean_final_exit_primary_energy / mean_initial_exit_primary_energy)
+        if mean_initial_exit_primary_energy and mean_initial_exit_primary_energy > 0
+           and mean_final_exit_primary_energy is not None
+        else None
+    )
+
+    # ------------------------------------------------------------------ #
+    # 6. Bragg Peak summary                                               #
+    # ------------------------------------------------------------------ #
+    total_classified = bragg_stopped_inside + bragg_stopped_after + bragg_stopped_before
+    bragg_inside_fraction = (
+        bragg_stopped_inside / total_classified if total_classified > 0 else 0.0
+    )
+    mean_bragg_stop_z = (
+        sum(bragg_stop_z_list) / len(bragg_stop_z_list) if bragg_stop_z_list else None
+    )
+    # Глубина пика Брэгга относительно начала экрана
+    mean_bragg_depth_mm = (
+        (mean_bragg_stop_z - first_z) if mean_bragg_stop_z is not None else None
+    )
+
+    # ------------------------------------------------------------------ #
+    # 7. Электроника: LET и доза                                          #
+    # ------------------------------------------------------------------ #
+    electronics_let = _compute_electronics_let_summary(
+        electronics_hits=electronics_hits or [],
+        electronics_info=electronics_info,
+        threshold_mev_cm2_mg=let_threshold_mev_cm2_mg,
+        dose_threshold_gy=dose_threshold_gy,
+        events=events,
+        absorbed_dose_gy_override=absorbed_dose_gy_override
+    )
+
+    # ------------------------------------------------------------------ #
+    # 8. Итоговый вердикт: защитил / не защитил                           #
+    #                                                                     #
+    # Критерии (все должны быть выполнены для "protected"):               #
+    #   C1. Коэффициент ослабления флюенса < 5%                           #
+    #       (менее 5% первичных частиц прошли насквозь)                   #
+    #   C2. Пик Брэгга: >= 90% первичных остановились ВНУТРИ экрана      #
+    #   C3. Поглощённая доза в электронике < порога                       #
+    #   C4. Максимальный LET в электронике < порога                       #
+    #   C5. Event upset risk = 0                                          #
+    # ------------------------------------------------------------------ #
+    dose_assessment  = electronics_let.get("dose_assessment", {})
+    event_upset_risk = electronics_let.get("event_upset_risk", {})
+
+    FAF_THRESHOLD          = 0.05   # <= 5% первичных прошли
+    BRAGG_INSIDE_THRESHOLD = 0.90   # >= 90% остановились внутри
+
+    c1_fluence_ok = fluence_attenuation_factor <= FAF_THRESHOLD
+    c2_bragg_ok   = bragg_inside_fraction >= BRAGG_INSIDE_THRESHOLD
+    c3_dose_ok    = dose_assessment.get("is_protected", False)
+    c4_let_ok     = not electronics_let.get("is_dangerous", False)
+    c5_upset_ok   = event_upset_risk.get("upset_events_count", 0) == 0
+
+    screen_protected = c1_fluence_ok and c2_bragg_ok and c3_dose_ok and c4_let_ok and c5_upset_ok
+
+    criteria_details = {
+        "C1_fluence_attenuation": {
+            "passed": c1_fluence_ok,
+            "value": fluence_attenuation_factor,
+            "threshold": FAF_THRESHOLD,
+            "description": f"Доля первичных, прошедших экран: "
+                           f"{fluence_attenuation_factor * 100:.2f}% "
+                           f"(порог <= {FAF_THRESHOLD * 100:.0f}%)"
+        },
+        "C2_bragg_peak_inside": {
+            "passed": c2_bragg_ok,
+            "value": bragg_inside_fraction,
+            "threshold": BRAGG_INSIDE_THRESHOLD,
+            "description": f"Доля первичных, остановившихся внутри экрана: "
+                           f"{bragg_inside_fraction * 100:.1f}% "
+                           f"(порог >= {BRAGG_INSIDE_THRESHOLD * 100:.0f}%)"
+        },
+        "C3_dose": {
+            "passed": c3_dose_ok,
+            "value": electronics_let.get("absorbed_dose_gy"),
+            "threshold": dose_threshold_gy,
+            "description": dose_assessment.get("reason", "Нет данных о дозе")
+        },
+        "C4_let": {
+            "passed": c4_let_ok,
+            "value": electronics_let.get("max_let_mev_cm2_mg"),
+            "threshold": let_threshold_mev_cm2_mg,
+            "description": electronics_let.get("reason", "Нет данных о LET")
+        },
+        "C5_event_upset": {
+            "passed": c5_upset_ok,
+            "value": event_upset_risk.get("upset_events_count", 0),
+            "threshold": 0,
+            "description": f"Событий с опасным LET: {event_upset_risk.get('upset_events_count', 0)}"
+        },
+    }
+
+    failed = [k for k, v in criteria_details.items() if not v["passed"]]
+    if screen_protected:
+        protection_verdict = "protected"
+        protection_reason  = (
+            "Экран признан защитным: все критерии выполнены — "
+            "коэффициент ослабления флюенса в норме, пик Брэгга внутри экрана, "
+            "доза и LET в электронике ниже порогов, event upset не выявлен."
+        )
+    else:
+        protection_verdict = "not_protected"
+        failed_desc = "; ".join(
+            criteria_details[k]["description"] for k in failed
+        )
+        protection_reason = f"Экран не признан защитным. Нарушены критерии: {failed_desc}"
+
+    logging.info(
+        "Shield verdict: %s | FAF=%.3f | BraggInside=%.2f | Dose=%s | "
+        "LET_max=%s | UpsetEvents=%d",
+        protection_verdict,
+        fluence_attenuation_factor,
+        bragg_inside_fraction,
+        electronics_let.get("absorbed_dose_gy"),
+        electronics_let.get("max_let_mev_cm2_mg"),
+        event_upset_risk.get("upset_events_count", 0),
+    )
+
+    return {
+        # --- первичные частицы ---
+        "primary_particles": {
+            "total": len(primary_profiles),
+            "stopped_in_screen": stopped_primary,
+            "stopped_by_material": stopped_primary_by_material,
+            "exited_screen": exited_primary,
+            "backscattered": backscattered_primary,
+            "stopping_fraction": (
+                stopped_primary / len(primary_profiles) if primary_profiles else 0.0
+            ),
+            "mean_initial_energy_exited_mev": mean_initial_exit_primary_energy,
+            "mean_exit_energy_mev": mean_final_exit_primary_energy,
+            "energy_attenuation_fraction": energy_attenuation_fraction,
+            "energy_attenuation_percent": (
+                energy_attenuation_fraction * 100.0
+                if energy_attenuation_fraction is not None else None
+            ),
+            "avg_energy_loss_mev": (
+                sum(energy_loss_primary) / len(energy_loss_primary)
+                if energy_loss_primary else 0.0
+            ),
+            "max_energy_loss_mev": max(energy_loss_primary) if energy_loss_primary else 0.0,
+            "min_energy_loss_mev": min(energy_loss_primary) if energy_loss_primary else 0.0,
+        },
+        # --- вторичные частицы ---
+        "secondary_particles": {
+            "total": len(secondary_profiles),
+            "stopped_in_screen": stopped_secondary,
+            "stopped_by_material": stopped_secondary_by_material,
+            "exited_screen": exited_secondary,
+            "backscattered": backscattered_secondary,
+            "absorbed_before_screen": absorbed_before_secondary,
+            "stopping_fraction": (
+                stopped_secondary / len(secondary_profiles) if secondary_profiles else 0.0
+            ),
+            "avg_energy_loss_mev": (
+                sum(energy_loss_secondary) / len(energy_loss_secondary)
+                if energy_loss_secondary else 0.0
+            ),
+        },
+        # --- пик Брэгга ---
+        "bragg_peak": {
+            "stopped_inside_screen": bragg_stopped_inside,
+            "stopped_after_screen":  bragg_stopped_after,
+            "stopped_before_screen": bragg_stopped_before,
+            "inside_fraction":       bragg_inside_fraction,
+            "inside_percent":        bragg_inside_fraction * 100.0,
+            "mean_stop_z_mm":        mean_bragg_stop_z,
+            "mean_stop_depth_mm":    mean_bragg_depth_mm,
+            "screen_thick_enough":   bragg_stopped_after == 0,
+            "comment": (
+                "Пик Брэгга внутри экрана — толщина достаточна."
+                if bragg_stopped_after == 0 and bragg_stopped_inside > 0
+                else (
+                    f"{bragg_stopped_after} первичных частиц остановились ЗА экраном — "
+                    "рекомендуется увеличить толщину."
+                    if bragg_stopped_after > 0
+                    else "Нет данных о траекториях первичных частиц."
+                )
+            ),
+        },
+        # --- коэффициент ослабления флюенса ---
+        "fluence_attenuation": {
+            "events_total":               events,
+            "primary_exited":             n_primary_exited,
+            "secondary_exited":           n_secondary_exited,
+            "fluence_attenuation_factor": fluence_attenuation_factor,
+            "fluence_attenuation_percent":fluence_attenuation_factor * 100.0,
+            "fluence_attenuation_coeff":  fluence_attenuation_coeff,
+            "stopping_efficiency_percent":fluence_attenuation_coeff * 100.0,
+            "comment": (
+                f"Экран задержал {fluence_attenuation_coeff * 100:.1f}% первичных частиц "
+                f"({events - n_primary_exited} из {events})."
+            ),
+        },
+        # --- остаточная энергия ---
+        "residual_energy": {
+            "primary_exit": {
+                "count":    n_primary_exited,
+                "mean_mev": mean_primary_exit_energy,
+                "max_mev":  max_primary_exit_energy,
+                "min_mev":  min_primary_exit_energy,
+            },
+            "secondary_exit": {
+                "count":    n_secondary_exited,
+                "mean_mev": mean_secondary_exit_energy,
+            },
+            "by_particle_type": exit_by_type_summary,
+        },
+        # --- геометрия экрана ---
+        "screen": {
+            "thickness_mm": screen_thickness,
+            "first_z_mm":   first_z,
+            "end_z_mm":     end_z,
+        },
+        # --- электроника: LET и доза ---
+        "electronics_let": electronics_let,
+        # --- итоговый вердикт ---
+        "screen_protection_report": {
+            "is_protected": screen_protected,
+            "verdict":      protection_verdict,
+            "reason":       protection_reason,
+            "criteria":     criteria_details,
+        },
+    }
 # -----------------------------
 # Запуск симуляции
 # -----------------------------
@@ -1843,7 +2005,7 @@ if __name__ == "__main__":
                 {
                     "Name": "W",
                     "Description": "Вольфрам (W) толщиной 2000 мкм",
-                    "Width": 3000.0,
+                    "Width": 500.0,
                     "Elements": [
                         {
                             "Name": "Вольфрам",
@@ -1856,16 +2018,16 @@ if __name__ == "__main__":
                     ]
                 },
                 {
-                    "Name": "Cu",
-                    "Description": "Cu",
+                    "Name": "Pb",
+                    "Description": "Pb layer",
                     "Width": 2000.0,
                     "Elements": [
                         {
-                            "Name": "Медь",
-                            "Symbol": "Cu",
-                            "Atomic_number": 29,
-                            "Standard_atomic_weight": 63.546,
-                            "Density": 8.92,
+                            "Name": "Свинец",
+                            "Symbol": "Pb",
+                            "Atomic_number": 82,
+                            "Standard_atomic_weight": 207.2,
+                            "Density": 11.35,
                             "Percentage": 100.0
                         }
                     ]

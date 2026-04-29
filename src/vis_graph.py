@@ -197,17 +197,71 @@ def plot_energy_analysis(result: SimulationResult, cfg: SimulationConfig, data: 
         print(f"Saved: {filename}")
 
     if hasattr(result, "exit_energies") and result.exit_energies:
-        plt.figure()
-        plt.hist(result.exit_energies, bins=30)
-        plt.xlabel("Energy (MeV)")
-        plt.ylabel("Counts")
-        plt.title("Exit Energy Spectrum")
-        plt.grid()
+        # --- разбираем на первичные / вторичные / по типам ---
+        primary_exit:   list = []
+        secondary_exit: list = []
+        by_type: dict = {}
 
+        for item in result.exit_energies:
+            if isinstance(item, dict):
+                e_mev  = float(item.get("energy_mev", 0.0))
+                is_pri = bool(item.get("is_primary", True))
+                ptype  = str(item.get("particle_type", "unknown"))
+            else:
+                e_mev, is_pri, ptype = float(item), True, "unknown"
+
+            if is_pri:
+                primary_exit.append(e_mev)
+            else:
+                secondary_exit.append(e_mev)
+            by_type.setdefault(ptype, []).append(e_mev)
+
+        # --- график 1: первичные vs вторичные ---
+        fig, ax = plt.subplots(figsize=(9, 5))
+        all_vals = primary_exit + secondary_exit
+        if all_vals:
+            import numpy as np
+            bins = np.linspace(0, max(all_vals) * 1.05 + 1e-9, 31)
+            if primary_exit:
+                ax.hist(primary_exit,   bins=bins, alpha=0.75,
+                        color="steelblue", label=f"Primary ({len(primary_exit)})")
+            if secondary_exit:
+                ax.hist(secondary_exit, bins=bins, alpha=0.60,
+                        color="tomato",    label=f"Secondary ({len(secondary_exit)})")
+        ax.set_xlabel("Exit Energy (MeV)")
+        ax.set_ylabel("Counts")
+        ax.set_title("Exit Energy Spectrum (Primary vs Secondary)")
+        ax.legend()
+        ax.grid(True, alpha=0.3)
         filename = os.path.join(out_dir, "exit_energy_spectrum.png")
-        plt.savefig(filename, dpi=300)
+        plt.savefig(filename, dpi=300, bbox_inches="tight")
         plt.close()
         print(f"Saved: {filename}")
+
+        # --- график 2: по типам частиц ---
+        if len(by_type) > 1 or (len(by_type) == 1 and list(by_type.keys())[0] != "unknown"):
+            fig, ax = plt.subplots(figsize=(9, 5))
+            import numpy as np
+            all_vals2 = [e for lst in by_type.values() for e in lst]
+            bins2 = np.linspace(0, max(all_vals2) * 1.05 + 1e-9, 31) if all_vals2 else 30
+            for ptype, energies in sorted(by_type.items()):
+                color = get_particle_color(ptype)
+                ax.hist(energies, bins=bins2, alpha=0.65,
+                        color=color, label=f"{ptype} ({len(energies)})")
+            ax.set_xlabel("Exit Energy (MeV)")
+            ax.set_ylabel("Counts")
+            ax.set_title("Exit Energy Spectrum by Particle Type")
+            ax.legend(fontsize=8)
+            ax.grid(True, alpha=0.3)
+            filename = os.path.join(out_dir, "exit_energy_by_type.png")
+            plt.savefig(filename, dpi=300, bbox_inches="tight")
+            plt.close()
+            print(f"Saved: {filename}")
+
+    # --- график: сводная диаграмма защиты (Protection Summary) ---
+    energy_summary = getattr(result, "energy_summary", None) or {}
+    if energy_summary:
+        _plot_protection_summary(energy_summary, out_dir)
 
     if result.screen_info and "Materials" in result.screen_info:
         materials = result.screen_info["Materials"]
@@ -232,6 +286,177 @@ def plot_energy_analysis(result: SimulationResult, cfg: SimulationConfig, data: 
         print(f"Saved: {filename}")
 
     print(f"\nAll plots saved in: {out_dir}")
+
+
+def _plot_protection_summary(energy_summary: dict, out_dir: str) -> None:
+    """Рисует сводную диаграмму защиты экрана из данных energy_summary."""
+    import matplotlib.pyplot as plt
+    import matplotlib.patches as mpatches
+    import numpy as np
+
+    report     = energy_summary.get("screen_protection_report", {})
+    fluence    = energy_summary.get("fluence_attenuation", {})
+    bragg      = energy_summary.get("bragg_peak", {})
+    elec_let   = energy_summary.get("electronics_let", {})
+    primary    = energy_summary.get("primary_particles", {})
+    secondary  = energy_summary.get("secondary_particles", {})
+    residual   = energy_summary.get("residual_energy", {})
+    criteria   = report.get("criteria", {})
+
+    is_protected = report.get("is_protected", False)
+    verdict_color = "#2ecc71" if is_protected else "#e74c3c"
+    verdict_label = "ЗАЩИЩАЕТ" if is_protected else "НЕ ЗАЩИЩАЕТ"
+
+    fig = plt.figure(figsize=(16, 10))
+    fig.patch.set_facecolor("#f8f9fa")
+
+    # ── Заголовок / вердикт ─────────────────────────────────────────────
+    ax_title = fig.add_axes([0.0, 0.88, 1.0, 0.12])
+    ax_title.set_axis_off()
+    ax_title.add_patch(plt.Rectangle((0, 0), 1, 1,
+                                     facecolor=verdict_color, alpha=0.15,
+                                     transform=ax_title.transAxes))
+    ax_title.text(0.5, 0.65, f"Экран: {verdict_label}",
+                  ha="center", va="center", fontsize=20, fontweight="bold",
+                  color=verdict_color, transform=ax_title.transAxes)
+    reason = report.get("reason", "")
+    ax_title.text(0.5, 0.20, reason,
+                  ha="center", va="center", fontsize=8, color="#444",
+                  wrap=True, transform=ax_title.transAxes)
+
+    # ── 1. Круговая диаграмма: судьба первичных частиц ──────────────────
+    ax1 = fig.add_axes([0.02, 0.48, 0.28, 0.38])
+    stopped    = primary.get("stopped_in_screen", 0)
+    exited     = primary.get("exited_screen", 0)
+    backsc     = primary.get("backscattered", 0)
+    other      = max(0, primary.get("total", 0) - stopped - exited - backsc)
+    pie_vals   = [stopped, exited, backsc, other]
+    pie_labels = ["Остановились\nв экране", "Прошли\nнасквозь",
+                  "Обратно\nрассеяны", "Прочее"]
+    pie_colors = ["#2ecc71", "#e74c3c", "#f39c12", "#95a5a6"]
+    non_zero   = [(v, l, c) for v, l, c in zip(pie_vals, pie_labels, pie_colors) if v > 0]
+    if non_zero:
+        vals, lbls, cols = zip(*non_zero)
+        wedges, texts, autotexts = ax1.pie(
+            vals, labels=lbls, colors=cols,
+            autopct="%1.1f%%", startangle=90,
+            textprops={"fontsize": 7}
+        )
+        for at in autotexts:
+            at.set_fontsize(7)
+    ax1.set_title("Судьба первичных частиц", fontsize=9, fontweight="bold")
+
+    # ── 2. Барплот: частицы по слоям ────────────────────────────────────
+    ax2 = fig.add_axes([0.35, 0.48, 0.30, 0.38])
+    stopped_by_mat   = primary.get("stopped_by_material", {})
+    stopped_sec_mat  = secondary.get("stopped_by_material", {})
+    all_layers = sorted(set(list(stopped_by_mat.keys()) + list(stopped_sec_mat.keys())))
+    if all_layers:
+        x       = np.arange(len(all_layers))
+        w       = 0.35
+        prim_v  = [stopped_by_mat.get(i, 0)    for i in all_layers]
+        sec_v   = [stopped_sec_mat.get(i, 0)   for i in all_layers]
+        ax2.bar(x - w/2, prim_v, w, label="Первичные", color="#3498db", alpha=0.85)
+        ax2.bar(x + w/2, sec_v,  w, label="Вторичные", color="#e67e22", alpha=0.85)
+        ax2.set_xticks(x)
+        ax2.set_xticklabels([f"Слой {i}" for i in all_layers], fontsize=8)
+        ax2.set_ylabel("Кол-во частиц", fontsize=8)
+        ax2.legend(fontsize=7)
+    ax2.set_title("Остановки по слоям", fontsize=9, fontweight="bold")
+    ax2.grid(axis="y", alpha=0.3)
+
+    # ── 3. Gauge: коэффициент ослабления флюенса ─────────────────────────
+    ax3 = fig.add_axes([0.68, 0.48, 0.30, 0.38])
+    faf_pct   = fluence.get("fluence_attenuation_factor", 0.0) * 100.0
+    stop_pct  = fluence.get("stopping_efficiency_percent", 0.0)
+    bar_color = "#2ecc71" if faf_pct <= 5 else ("#f39c12" if faf_pct <= 20 else "#e74c3c")
+    ax3.barh(["Прошли сквозь", "Задержано"],
+             [faf_pct, stop_pct],
+             color=["#e74c3c", "#2ecc71"], height=0.4, alpha=0.85)
+    ax3.set_xlim(0, 100)
+    ax3.set_xlabel("%", fontsize=8)
+    for spine in ["top", "right"]:
+        ax3.spines[spine].set_visible(False)
+    ax3.text(faf_pct + 1,  0, f"{faf_pct:.1f}%",  va="center", fontsize=9, color="#e74c3c")
+    ax3.text(stop_pct + 1, 1, f"{stop_pct:.1f}%", va="center", fontsize=9, color="#2ecc71")
+    ax3.set_title("Ослабление флюенса первичных", fontsize=9, fontweight="bold")
+    ax3.grid(axis="x", alpha=0.3)
+
+    # ── 4. Таблица критериев ─────────────────────────────────────────────
+    ax4 = fig.add_axes([0.02, 0.02, 0.60, 0.42])
+    ax4.set_axis_off()
+    ax4.set_title("Критерии защиты", fontsize=9, fontweight="bold", loc="left")
+    rows = []
+    crit_order = ["C1_fluence_attenuation", "C2_bragg_peak_inside",
+                  "C3_dose", "C4_let", "C5_event_upset"]
+    for k in crit_order:
+        v = criteria.get(k, {})
+        status = "✓ ОК" if v.get("passed", False) else "✗ НЕТ"
+        desc   = v.get("description", "")
+        val    = v.get("value")
+        thr    = v.get("threshold")
+        val_str = f"{val:.4g}" if isinstance(val, float) else str(val)
+        thr_str = f"{thr:.4g}" if isinstance(thr, float) else str(thr)
+        rows.append([status, k, val_str, thr_str, desc[:60]])
+    if rows:
+        col_labels = ["Статус", "Критерий", "Значение", "Порог", "Описание"]
+        tbl = ax4.table(
+            cellText=rows,
+            colLabels=col_labels,
+            cellLoc="left",
+            loc="upper left",
+            bbox=[0, 0, 1, 1]
+        )
+        tbl.auto_set_font_size(False)
+        tbl.set_fontsize(7.5)
+        for (r, c), cell in tbl.get_celld().items():
+            cell.set_edgecolor("#cccccc")
+            if r == 0:
+                cell.set_facecolor("#dde3ea")
+                cell.set_text_props(fontweight="bold")
+            elif r > 0 and c == 0:
+                passed = rows[r - 1][0].startswith("✓")
+                cell.set_facecolor("#d5f5e3" if passed else "#fadbd8")
+
+    # ── 5. Блок: LET и доза ──────────────────────────────────────────────
+    ax5 = fig.add_axes([0.65, 0.02, 0.33, 0.42])
+    ax5.set_axis_off()
+    ax5.set_title("Электроника", fontsize=9, fontweight="bold", loc="left")
+    let_max  = elec_let.get("max_let_mev_cm2_mg")
+    let_avg  = elec_let.get("avg_let_mev_cm2_mg")
+    dose_gy  = elec_let.get("absorbed_dose_gy")
+    edep_mev = elec_let.get("deposited_energy_mev")
+    residual_primary = residual.get("primary_exit", {})
+    lines = [
+        ("Max LET (MeV·cm²/mg)",  f"{let_max:.4f}"  if let_max  is not None else "—"),
+        ("Avg LET (MeV·cm²/mg)",  f"{let_avg:.4f}"  if let_avg  is not None else "—"),
+        ("Доза (Gy)",              f"{dose_gy:.4e}"  if dose_gy  is not None else "—"),
+        ("Edep (MeV)",             f"{edep_mev:.4f}" if edep_mev is not None else "—"),
+        ("", ""),
+        ("Остат. энергия (среднее)",
+         f"{residual_primary.get('mean_mev'):.2f} МэВ"
+         if residual_primary.get("mean_mev") is not None else "—"),
+        ("Прошло первичных",       str(residual_primary.get("count", 0))),
+        ("Bragg peak внутри",
+         f"{bragg.get('inside_percent', 0.0):.1f}%"),
+    ]
+    y = 0.93
+    for label, value in lines:
+        if label == "":
+            y -= 0.06
+            continue
+        ax5.text(0.02, y, label + ":", fontsize=8, color="#555",
+                 transform=ax5.transAxes, va="top")
+        ax5.text(0.62, y, value, fontsize=8, fontweight="bold", color="#222",
+                 transform=ax5.transAxes, va="top")
+        y -= 0.11
+
+    plt.savefig(
+        os.path.join(out_dir, "protection_summary.png"),
+        dpi=150, bbox_inches="tight", facecolor=fig.get_facecolor()
+    )
+    plt.close()
+    print(f"Saved: {os.path.join(out_dir, 'protection_summary.png')}")
 
 
 def visualize_multi_particle_results(cfg: SimulationConfig, result: SimulationResult, input_data: dict, dir: str):
