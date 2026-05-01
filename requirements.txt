@@ -21,7 +21,7 @@ trame-vtk==2.5.8
 trame-vuetify==2.8.1
 python-multipart==0.0.6
 matplotlib==3.7.2
-geant4-pybind==0.1.0b12
+geant4-pybind==0.1.2
 langchain_gigachat
 langgraph
 ddgs
