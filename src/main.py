@@ -324,7 +324,6 @@ class ScreenGeometry(g4.G4VUserDetectorConstruction):
                 0.001 * g4.MeV
             )
             self.electronics_logical.SetUserLimits(user_limits)
-            # logging.info(f"mass of electronics {self.electronics_logical.GetMass()/g4.g}")
             g4.G4PVPlacement(
                 None,
                 g4.G4ThreeVector(0, electronics_center_y, electronics_center_z),
@@ -335,6 +334,12 @@ class ScreenGeometry(g4.G4VUserDetectorConstruction):
                 0,
                 check_overlaps
             )
+            # Исправление #3: масса берётся из Geant4 через GetMass() (результат в г, переводим в мг),
+            # а не вычисляется вручную через плотность × объём.
+            # GetMass() вызывается ПОСЛЕ G4PVPlacement — том уже размещён,
+            # Geant4 знает реальную геометрию и учитывает возможные дочерние объёмы.
+            electronics_mass_mg = self.electronics_logical.GetMass() / g4.g * 1000.0
+            logging.info(f"mass of electronics (G4): {electronics_mass_mg} mg")
             self.screen_info["Electronics"] = {
                 "material": electronics_material_name,
                 "density_g_cm3": electronics_material.GetDensity() / (g4.g / g4.cm3),
@@ -344,13 +349,7 @@ class ScreenGeometry(g4.G4VUserDetectorConstruction):
                 "thickness_mm": electronics_thickness_mm,
                 "xy_size_mm": max(electronics_size_x_mm, electronics_size_y_mm),
                 "volume_mm3": electronics_size_x_mm * electronics_size_y_mm * electronics_thickness_mm,
-                "mass_mg": (
-                    (electronics_size_x_mm / 10.0)
-                    * (electronics_size_y_mm / 10.0)
-                    * (electronics_thickness_mm / 10.0)
-                    * (electronics_material.GetDensity() / (g4.g / g4.cm3))
-                    * 1000.0
-                ),
+                "mass_mg": electronics_mass_mg,
                 "z_start_mm": self.screens_end_z_mm + electronics_gap_mm,
                 "z_end_mm": self.screens_end_z_mm + electronics_gap_mm + electronics_thickness_mm
             }
@@ -389,7 +388,16 @@ class ScreenSensitiveDetector(g4.G4VSensitiveDetector):
     def __init__(self, name, screen_info):
         super().__init__(name)
         self.screen_info = screen_info
-        self.stopped_tracks = set()  # Хранит (event_id, track_id)
+        # Хранит (event_id, track_id) только для ТЕКУЩЕГО события.
+        # Очищается в Initialize(), который Geant4 вызывает в начале каждого события.
+        self.stopped_tracks = set()
+
+    def Initialize(self, hit_collection_of_this_event):
+        # Исправление #9: сбрасываем множество в начале каждого события.
+        # Без этого stopped_tracks растёт бесконечно (утечка памяти) и при
+        # совпадении ключей (event_id, track_id) между событиями остановка
+        # частицы не регистрировалась бы повторно.
+        self.stopped_tracks.clear()
 
     def ProcessHits(self, aStep: g4.G4Step, _hist):
         track: g4.G4Track = aStep.GetTrack()
@@ -489,28 +497,31 @@ class ElectronicsSensitiveDetector(g4.G4VSensitiveDetector):
         else:
             let_step_mev_cm2_mg = 0.0
 
+        # Исправление #8: LET вычисляется на СРЕДНЕЙ энергии шага (pre + post) / 2,
+        # а не только на pre_energy. Это физически корректнее, особенно в области
+        # пика Брэгга, где энергия резко падает на протяжении одного шага.
+        mid_energy_mev = (pre_energy_mev + post_energy_mev) / 2.0
+
         if (
             particle_def is not None
             and abs(particle_def.GetPDGCharge()) > 0
             and material is not None
-            and pre_energy_mev > 0
+            and mid_energy_mev > 0
             and density_g_cm3 > 0
         ):
             try:
                 dedx_internal = self.em_calculator.ComputeElectronicDEDX(
-                    pre_energy_mev * g4.MeV,
+                    mid_energy_mev * g4.MeV,
                     particle_def,
                     material
                 )
                 dedx_mev_per_mm = dedx_internal / (g4.MeV / g4.mm)
-                # logging.info(f"dedx_mev_per_mm: {dedx_mev_per_mm}")
                 let_step_mev_cm2_mg = dedx_mev_per_mm / (density_g_cm3 * 100.0)
-                # logging.info(f"let_step_mev_cm2_mg: {let_step_mev_cm2_mg}")
             except Exception as exc:
                 logging.warning(
-                    "G4EmCalculator LET failed for particle=%s, energy=%.6f MeV: %s",
+                    "G4EmCalculator LET failed for particle=%s, mid_energy=%.6f MeV: %s",
                     particle_name,
-                    pre_energy_mev,
+                    mid_energy_mev,
                     exc
                 )
         else:
@@ -559,9 +570,18 @@ class ScreenEventAction(g4.G4UserEventAction):
         if self.tracks is not None and self.dose_collection_name:
             try:
                 if self._dose_collection_id is None or self._dose_collection_id < 0:
-                    self._dose_collection_id = g4.G4SDManager.GetSDMpointer().GetCollectionID(
+                    new_id = g4.G4SDManager.GetSDMpointer().GetCollectionID(
                         self.dose_collection_name
                     )
+                    # Исправление #5: при нерабочем scorer предупреждаем явно,
+                    # чтобы не было молчаливого fallback на manual_edep_over_mass.
+                    if new_id < 0:
+                        logging.warning(
+                            "Dose scorer collection '%s' not found (id=%d). "
+                            "absorbed_dose_gy will be estimated from edep/mass fallback.",
+                            self.dose_collection_name, new_id
+                        )
+                    self._dose_collection_id = new_id
 
                 if self._dose_collection_id is not None and self._dose_collection_id >= 0:
                     hce = anEvent.GetHCofThisEvent()
@@ -570,7 +590,10 @@ class ScreenEventAction(g4.G4UserEventAction):
                         dose_event_gy = 0.0
                         if hc is not None:
                             for _, value in hc:
-                                dose_event_gy += float(value)
+                                # Исправление #2: G4PSDoseDeposit возвращает значение
+                                # во внутренних единицах Geant4 (MeV/kg * system factor).
+                                # Необходимо явно делить на g4.gray для перевода в Гр.
+                                dose_event_gy += float(value) / g4.gray
                         self.tracks.add_electronics_dose_event(dose_event_gy)
             except Exception as exc:
                 logging.warning("Failed to read dose scorer collection '%s': %s", self.dose_collection_name, exc)
@@ -1217,8 +1240,21 @@ def _compute_electronics_let_summary(
             if mass_kg > 0 else None
         )
     )
-    dose_per_primary_gy = absorbed_dose_gy / events if events > 0 else None
-    logging.info(f"dose_per_primary_gy: {dose_per_primary_gy}")
+    # Исправление #4: два показателя нормировки дозы.
+    # dose_per_primary_gy     — доза на ОДНО запущенное событие (для экстраполяции на флюенс).
+    # dose_per_hit_event_gy   — доза на событие, реально достигшее электроники
+    #                           (физически корректная характеристика проникающих частиц).
+    n_hit_events = len(event_max_let)
+    dose_per_primary_gy = (
+        absorbed_dose_gy / events
+        if (absorbed_dose_gy is not None and events > 0) else None
+    )
+    dose_per_hit_event_gy = (
+        absorbed_dose_gy / n_hit_events
+        if (absorbed_dose_gy is not None and n_hit_events > 0) else None
+    )
+    logging.info(f"dose_per_primary_gy (all events): {dose_per_primary_gy}")
+    logging.info(f"dose_per_hit_event_gy (hit events only): {dose_per_hit_event_gy}")
     logging.info(f"deposited_energy_mev: {deposited_energy_mev}")
     logging.info(f"absorbed_dose_gy: {absorbed_dose_gy}")
     dose_risk = _classify_dose_risk(
@@ -1247,6 +1283,9 @@ def _compute_electronics_let_summary(
         "mass_mg": mass_mg,
         "deposited_energy_mev": deposited_energy_mev,
         "absorbed_dose_gy": absorbed_dose_gy,
+        "dose_per_primary_gy": dose_per_primary_gy,
+        "dose_per_hit_event_gy": dose_per_hit_event_gy,
+        "n_hit_events": n_hit_events,
         "dose_source": "g4_ps_dose_deposit" if absorbed_dose_gy_override is not None else "manual_edep_over_mass",
         "dose_threshold_gy": dose_threshold_gy,
         "dose_assessment": {
@@ -1432,6 +1471,22 @@ def _compute_energy_summary(
         except (ValueError, TypeError, IndexError):
             continue
 
+    # ------------------------------------------------------------------ #
+    # Исправление #7: проверка рассогласования двух счётчиков.           #
+    # n_primary_exited — из exit_energies (ScreenSteppingAction):        #
+    #   фиксирует реальное пересечение задней границы экрана.            #
+    # exited_primary   — из energy_profiles (финальная z > end_z):       #
+    #   анализирует последнюю точку трека.                               #
+    # Авторитетный источник для FAF — exit_energies.                     #
+    # ------------------------------------------------------------------ #
+    if abs(n_primary_exited - exited_primary) > max(1, int(0.05 * events)):
+        logging.warning(
+            "Counter mismatch: exit_energies primary exited=%d vs "
+            "energy_profiles exited_primary=%d (events=%d). "
+            "FAF computed from exit_energies (boundary crossing).",
+            n_primary_exited, exited_primary, events
+        )
+
     # --- вторичные ---
     stopped_secondary             = 0
     exited_secondary              = 0
@@ -1531,11 +1586,16 @@ def _compute_energy_summary(
     FAF_THRESHOLD          = 0.05   # <= 5% первичных прошли
     BRAGG_INSIDE_THRESHOLD = 0.90   # >= 90% остановились внутри
 
+    # Исправление #6: если electronics_let пуст — электроника не задана в конфиге.
+    # В этом случае критерии C3/C4/C5 не применимы и считаются пройденными,
+    # чтобы не давать ложный вердикт "not_protected" при отсутствии электроники.
+    electronics_absent = not bool(electronics_let)
+
     c1_fluence_ok = fluence_attenuation_factor <= FAF_THRESHOLD
     c2_bragg_ok   = bragg_inside_fraction >= BRAGG_INSIDE_THRESHOLD
-    c3_dose_ok    = dose_assessment.get("is_protected", False)
-    c4_let_ok     = not electronics_let.get("is_dangerous", False)
-    c5_upset_ok   = event_upset_risk.get("upset_events_count", 0) == 0
+    c3_dose_ok    = electronics_absent or dose_assessment.get("is_protected", False)
+    c4_let_ok     = electronics_absent or (not electronics_let.get("is_dangerous", False))
+    c5_upset_ok   = electronics_absent or (event_upset_risk.get("upset_events_count", 0) == 0)
 
     screen_protected = c1_fluence_ok and c2_bragg_ok and c3_dose_ok and c4_let_ok and c5_upset_ok
 
@@ -1556,23 +1616,35 @@ def _compute_energy_summary(
                            f"{bragg_inside_fraction * 100:.1f}% "
                            f"(порог >= {BRAGG_INSIDE_THRESHOLD * 100:.0f}%)"
         },
-        "C3_dose": {
+                "C3_dose": {
             "passed": c3_dose_ok,
             "value": electronics_let.get("absorbed_dose_gy"),
             "threshold": dose_threshold_gy,
-            "description": dose_assessment.get("reason", "Нет данных о дозе")
+            "description": (
+                "Электроника не задана — критерий не применяется."
+                if electronics_absent
+                else dose_assessment.get("reason", "Нет данных о дозе")
+            )
         },
         "C4_let": {
             "passed": c4_let_ok,
             "value": electronics_let.get("max_let_mev_cm2_mg"),
             "threshold": let_threshold_mev_cm2_mg,
-            "description": electronics_let.get("reason", "Нет данных о LET")
+            "description": (
+                "Электроника не задана — критерий не применяется."
+                if electronics_absent
+                else electronics_let.get("reason", "Нет данных о LET")
+            )
         },
         "C5_event_upset": {
             "passed": c5_upset_ok,
             "value": event_upset_risk.get("upset_events_count", 0),
             "threshold": 0,
-            "description": f"Событий с опасным LET: {event_upset_risk.get('upset_events_count', 0)}"
+            "description": (
+                "Электроника не задана — критерий не применяется."
+                if electronics_absent
+                else f"Событий с опасным LET: {event_upset_risk.get('upset_events_count', 0)}"
+            )
         },
     }
 
@@ -1820,13 +1892,26 @@ class SimulationRunner:
                     if "energy_summary" in result_dict and result_dict["energy_summary"]:
                         logging.info(f'energy_summary: {result_dict["energy_summary"]}')
                         electronics_let = (result_dict.get("energy_summary") or {}).get("electronics_let") or {}
-                        dose_value = electronics_let.get("absorbed_dose_gy")
-                        if dose_value is not None:
+                        # Исправление #1: берём дозу ТОЛЬКО если источник — G4PSDoseDeposit
+                        # (dose_source == "g4_ps_dose_deposit"), т.е. scorer реально сработал.
+                        # Дозу из "manual_edep_over_mass" НЕ суммируем здесь:
+                        # all_electronics_hits уже содержит все edep, и финальный
+                        # _compute_energy_summary сам пересчитает дозу через edep/mass
+                        # без двойного счёта.
+                        dose_source = electronics_let.get("dose_source")
+                        dose_value  = electronics_let.get("absorbed_dose_gy")
+                        if dose_value is not None and dose_source == "g4_ps_dose_deposit":
                             try:
                                 all_absorbed_dose_gy += float(dose_value)
                                 has_absorbed_dose_gy = True
                             except (TypeError, ValueError):
                                 pass
+                        elif dose_source == "manual_edep_over_mass":
+                            logging.info(
+                                "Skipping manual_edep_over_mass dose %.6f Gy for particle '%s': "
+                                "will be recomputed from all_electronics_hits in final summary.",
+                                dose_value or 0.0, p_config.name
+                            )
 
                     res_screen = result_dict.get("screen_info", {})
                     res_mats = res_screen.get("Materials", [])
@@ -2046,10 +2131,10 @@ if __name__ == "__main__":
         input_data=data,
         particles=[
             ParticleConfig(name="He3", energy_mev=30.0),
-            # ParticleConfig(name="e-", energy_mev=50.0),
+            # ParticleConfig(name="e-", energy_mev=100.0),
             # ParticleConfig(name="gamma", energy_mev=60.0),
             ParticleConfig(name="alpha", energy_mev=70.0),
-            ParticleConfig(name="proton", energy_mev=30.0)
+            ParticleConfig(name="proton", energy_mev=70.0)
             # ParticleConfig(name="neutron", energy_mev=50.0)
         ],
         events=events,
