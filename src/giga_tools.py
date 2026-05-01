@@ -118,38 +118,110 @@ class ElementInfo(BaseModel):
     symbol: str = Field(description="Химический символ элемента")
     atomic_number: int = Field(description="Атомный номер элемента")
     standard_atomic_weight: float = Field(description="Стандартный атомный вес")
-    density: float = Field(description="Плотность элемента")
-    percentage: float = Field(description="Процентное содержание конкретного элемента во всем материале")
+    density: Optional[float] = Field(
+        default=None,
+        description=(
+            "Плотность элемента в г/см³. "
+            "Обязательна для обычных материалов и сплавов (isCompound=false). "
+            "Для соединений (isCompound=true) не требуется — плотность задаётся "
+            "на уровне материала, а доли вычисляются из NAtoms."
+        )
+    )
+    percentage: Optional[float] = Field(
+        default=None,
+        description=(
+            "Массовая доля элемента в материале в процентах (0–100). "
+            "Используется для обычных материалов и сплавов (isCompound=false). "
+            "Для соединений (isCompound=true) не нужна — вычисляется автоматически из NAtoms."
+        )
+    )
+    n_atoms: Optional[int] = Field(
+        default=None,
+        description=(
+            "Количество атомов данного элемента в молекуле соединения. "
+            "Используется только при isCompound=true. "
+            "Например, для H₂O: H → n_atoms=2, O → n_atoms=1."
+        )
+    )
 
     def to_dict(self) -> Dict[str, Any]:
         """
-        Конвертирует ElementInfo в словарь с переименованными полями
+        Конвертирует ElementInfo в словарь с переименованными полями.
+        Включает только непустые поля, чтобы не нарушать обратную совместимость.
         """
-        return {
+        result: Dict[str, Any] = {
             "Name": self.name,
             "Symbol": self.symbol,
             "Atomic_number": self.atomic_number,
             "Standard_atomic_weight": self.standard_atomic_weight,
-            "Density": self.density,
-            "Percentage": self.percentage
         }
+        if self.density is not None:
+            result["Density"] = self.density
+        if self.percentage is not None:
+            result["Percentage"] = self.percentage
+        if self.n_atoms is not None:
+            result["NAtoms"] = self.n_atoms
+        return result
 
 class MaterialInfo(BaseModel):
     name: str = Field(description="Название материала")
     description: str = Field(description="Описание материала")
     width: float = Field(description="Толщина материала (слоя) в мкм")
-    elements: List[ElementInfo] = Field(description="Список элементов")
+    elements: Optional[List[ElementInfo]] = Field(
+        default=None,
+        description=(
+            "Список элементов, составляющих материал. "
+            "Не требуется если задано поле nist_name."
+        )
+    )
+    density: Optional[float] = Field(
+        default=None,
+        description=(
+            "Плотность материала в г/см³. "
+            "Если не указана для обычного материала — вычисляется как средневзвешенная "
+            "по долям элементов (поведение по умолчанию). "
+            "Обязательна для соединений (is_compound=true)."
+        )
+    )
+    is_compound: Optional[bool] = Field(
+        default=False,
+        description=(
+            "Признак химического соединения. "
+            "Если true — массовые доли элементов вычисляются автоматически "
+            "из числа атомов (NAtoms) и атомных масс. "
+            "Требует обязательного указания density и NAtoms для каждого элемента. "
+            "Если false или не указано — используется стандартный расчёт через Percentage."
+        )
+    )
+    nist_name: Optional[str] = Field(
+        default=None,
+        description=(
+            "Имя материала из базы NIST Geant4 (например 'G4_POLYETHYLENE', 'G4_WATER', "
+            "'G4_KAPTON', 'G4_Al', 'G4_Fe'). "
+            "Если указано — материал берётся напрямую из базы NIST; "
+            "поля elements, density и is_compound игнорируются."
+        )
+    )
 
     def to_dict(self) -> Dict[str, Any]:
         """
-        Конвертирует MaterialInfo в словарь с переименованными полями
+        Конвертирует MaterialInfo в словарь с переименованными полями.
+        Включает только непустые поля, чтобы не нарушать обратную совместимость.
         """
-        return {
+        result: Dict[str, Any] = {
             "Name": self.name,
             "Description": self.description,
             "Width": self.width,
-            "Elements": [element.to_dict() for element in self.elements]
         }
+        if self.nist_name is not None:
+            result["NistName"] = self.nist_name
+        if self.density is not None:
+            result["Density"] = self.density
+        if self.is_compound:
+            result["isCompound"] = self.is_compound
+        if self.elements:
+            result["Elements"] = [element.to_dict() for element in self.elements]
+        return result
 
 class ScreenInfo(BaseModel):
     """

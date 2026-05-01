@@ -32,6 +32,179 @@ logging.basicConfig(
 
 _geant4_initialized = False
 
+# ---------------------------------------------------------------------------
+# Список известных префиксов имён материалов Geant4 NIST.
+# Если имя материала (или поле NistName) начинается с одного из них,
+# материал берётся напрямую из базы NIST — без ручного задания состава.
+# ---------------------------------------------------------------------------
+_GEANT4_NIST_PREFIXES = ("G4_", "G4_NIST_")
+
+
+def _build_g4material(mat_name: str, mat: dict, nist) -> "g4.G4Material":
+    """Создаёт G4Material из словаря описания слоя экрана.
+
+    Поддерживает три режима (в порядке приоритета):
+
+    Режим 1 — NIST-материал.
+        Срабатывает если:
+        - задано поле ``NistName`` (например ``"G4_POLYETHYLENE"``), ИЛИ
+        - ``mat_name`` начинается с ``"G4_"`` или ``"G4_NIST_"``.
+        Материал берётся напрямую из базы NIST Geant4.
+
+    Режим 2 — соединение (``isCompound: true``).
+        Срабатывает если:
+        - ``isCompound == true``,
+        - задана ``Density`` на уровне материала,
+        - у каждого элемента есть поле ``NAtoms`` (число атомов в молекуле).
+        Массовые доли вычисляются автоматически из стехиометрии.
+        Если хотя бы одно условие нарушено — используется режим 3.
+
+    Режим 3 — обычный материал / сплав (обратная совместимость).
+        Плотность берётся из поля ``Density`` материала (если задана)
+        или вычисляется как средневзвешенная по долям элементов.
+    """
+    # ------------------------------------------------------------------
+    # Режим 1: NIST-материал
+    # ------------------------------------------------------------------
+    nist_name: Optional[str] = mat.get("NistName")
+    if nist_name:
+        g4mat = nist.FindOrBuildMaterial(str(nist_name))
+        if g4mat is not None:
+            logging.info("[Material] '%s': using NIST material '%s'", mat_name, nist_name)
+            return g4mat
+        logging.warning(
+            "[Material] '%s': NistName '%s' not found in NIST database, "
+            "falling back to element-based construction.",
+            mat_name, nist_name
+        )
+
+    if any(mat_name.startswith(prefix) for prefix in _GEANT4_NIST_PREFIXES):
+        g4mat = nist.FindOrBuildMaterial(mat_name)
+        if g4mat is not None:
+            logging.info(
+                "[Material] '%s': name matches NIST prefix, using NIST material.", mat_name
+            )
+            return g4mat
+        logging.warning(
+            "[Material] '%s': looks like a NIST name but was not found; "
+            "falling back to element-based construction.",
+            mat_name
+        )
+
+    elems: list = mat.get("Elements", [])
+    if not elems:
+        raise ValueError(
+            f"Material '{mat_name}': no elements defined and no valid NIST name found."
+        )
+
+    # Плотность на уровне материала (опциональна)
+    mat_density_raw = mat.get("Density")
+    mat_density: Optional[float] = (
+        float(mat_density_raw) if mat_density_raw is not None else None
+    )
+
+    is_compound: bool = bool(mat.get("isCompound", False))
+
+    # ------------------------------------------------------------------
+    # Режим 2: соединение — стехиометрия через NAtoms
+    # ------------------------------------------------------------------
+    if is_compound and mat_density is not None:
+        n_atoms_list = []
+        compound_ok = True
+        for elem in elems:
+            n_atoms_raw = elem.get("NAtoms")
+            if n_atoms_raw is None:
+                logging.warning(
+                    "[Material] '%s': isCompound=true but element '%s' "
+                    "has no NAtoms field; falling back to Mode 3.",
+                    mat_name, elem.get("Symbol", "?")
+                )
+                compound_ok = False
+                break
+            try:
+                n_atoms_list.append(int(n_atoms_raw))
+            except (TypeError, ValueError):
+                logging.warning(
+                    "[Material] '%s': NAtoms='%s' for element '%s' "
+                    "is not an integer; falling back to Mode 3.",
+                    mat_name, n_atoms_raw, elem.get("Symbol", "?")
+                )
+                compound_ok = False
+                break
+
+        if compound_ok:
+            element_objs = []
+            atomic_masses = []
+            for elem, n_atoms in zip(elems, n_atoms_list):
+                symbol = str(elem.get("Symbol"))
+                g4elem = nist.FindOrBuildElement(symbol)
+                if g4elem is None:
+                    raise ValueError(
+                        f"Material '{mat_name}': element '{symbol}' not found in Geant4."
+                    )
+                atomic_masses.append(g4elem.GetAtomicMassAmu())
+                element_objs.append(g4elem)
+
+            contributions = [n * m for n, m in zip(n_atoms_list, atomic_masses)]
+            total_molar_mass = sum(contributions)
+            fractions = [c / total_molar_mass for c in contributions]
+
+            g4mat = g4.G4Material(
+                mat_name,
+                mat_density * g4.g / g4.cm3,
+                len(element_objs)
+            )
+            for g4elem, frac in zip(element_objs, fractions):
+                g4mat.AddElement(g4elem, frac=frac)
+
+            logging.info(
+                "[Material] '%s' (compound): density=%.4f g/cm3, elements=%s, fractions=%s",
+                mat_name,
+                mat_density,
+                [e.GetSymbol() for e in element_objs],
+                [f"{f:.4f}" for f in fractions]
+            )
+            return g4mat
+
+    # ------------------------------------------------------------------
+    # Режим 3: обычный материал / сплав (обратная совместимость)
+    # ------------------------------------------------------------------
+    el_defs = []
+    for elem in elems:
+        symbol = str(elem.get("Symbol"))
+        fraction = float(elem.get("Percentage", 100.0))
+        elem_density_raw = elem.get("Density")
+        elem_density = float(elem_density_raw) if elem_density_raw is not None else 0.0
+        g4elem = nist.FindOrBuildElement(symbol)
+        if g4elem is None:
+            raise ValueError(
+                f"Material '{mat_name}': element '{symbol}' not found in Geant4."
+            )
+        el_defs.append((g4elem, fraction, elem_density))
+
+    total_fraction = sum(fr for _, fr, _ in el_defs) or 1.0
+
+    if mat_density is not None:
+        density_g_cm3 = mat_density
+        logging.info(
+            "[Material] '%s' (mode 3, explicit density): density=%.4f g/cm3",
+            mat_name, density_g_cm3
+        )
+    else:
+        density_g_cm3 = sum(
+            (fr / total_fraction) * rho for _, fr, rho in el_defs
+        )
+        logging.info(
+            "[Material] '%s' (mode 3, computed density): density=%.4f g/cm3",
+            mat_name, density_g_cm3
+        )
+
+    g4mat = g4.G4Material(mat_name, density_g_cm3 * g4.g / g4.cm3, len(el_defs))
+    for g4elem, fr, _ in el_defs:
+        g4mat.AddElement(g4elem, frac=(fr / total_fraction))
+
+    return g4mat
+
 
 def _configure_geant4_data_env() -> None:
     """Populate required Geant4 dataset environment variables when possible."""
@@ -264,19 +437,7 @@ class ScreenGeometry(g4.G4VUserDetectorConstruction):
                 "Secondary_stuck_count": 0,
                 "Thickness_mm": thickness_mm,
             })
-            
-            elems = mat.get("Elements", [])
-            el_defs = []
-            for elem in elems:
-                symbol = str(elem.get("Symbol"))
-                fraction = float(elem.get("Percentage"))
-                density = float(elem.get("Density"))
-                el_defs.append((nist.FindOrBuildElement(symbol), fraction, density))
-            total_fraction = sum(fr for _, fr, _ in el_defs) or 1.0
-            avg_density = sum((fr / total_fraction) * rho for _, fr, rho in el_defs)
-            g4mat = g4.G4Material(mat_name, avg_density * g4.g / g4.cm3, len(el_defs))
-            for element, fr, _ in el_defs:
-                g4mat.AddElement(element, frac=(fr / total_fraction))
+            g4mat = _build_g4material(mat_name, mat, nist)
             material_defs.append((g4mat, thickness_mm * g4.mm, mat_name))
         logging.info(f"Screen info: {self.screen_info}")
 
@@ -2116,6 +2277,33 @@ if __name__ == "__main__":
                             "Percentage": 100.0
                         }
                     ]
+                },
+                {
+                    "Name": "Be",
+                    "Description": "Be",
+                    "Width": 2000.0,
+                    "Elements": [
+                        {
+                            "Name": "Бериллий",
+                            "Symbol": "Be",
+                            "Atomic_number": 4,
+                            "Standard_atomic_weight": 9.012,
+                            "Density": 1.85,
+                            "Percentage": 100.0
+                        }
+                    ]
+                },
+                {
+                    "Name": "Kapton",
+                    "Width": 5000.0,
+                    "Density": 1.42,
+                    "isCompound": True,
+                    "Elements": [
+                        {"Symbol": "C", "NAtoms": 22},
+                        {"Symbol": "H", "NAtoms": 10},
+                        {"Symbol": "N", "NAtoms": 2},
+                        {"Symbol": "O", "NAtoms": 5}
+                    ]
                 }
             ]
         }
@@ -2134,7 +2322,7 @@ if __name__ == "__main__":
             # ParticleConfig(name="e-", energy_mev=100.0),
             # ParticleConfig(name="gamma", energy_mev=60.0),
             ParticleConfig(name="alpha", energy_mev=70.0),
-            ParticleConfig(name="proton", energy_mev=70.0)
+            ParticleConfig(name="proton", energy_mev=30.0)
             # ParticleConfig(name="neutron", energy_mev=50.0)
         ],
         events=events,
