@@ -8,8 +8,8 @@ import subprocess
 import sys
 import tempfile
 import uuid
-from datetime import datetime
 from dataclasses import fields
+from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Dict, List, Optional
@@ -17,7 +17,7 @@ from typing import Any, Dict, List, Optional
 import uvicorn
 from fastapi import BackgroundTasks, FastAPI, HTTPException
 from fastapi.responses import FileResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from simulations import SimulationConfig
 from vis_graph import plot_energy_analysis
@@ -30,6 +30,62 @@ app = FastAPI(title="Geant4 Simulation API")
 simulation_statuses: Dict[str, Dict[str, Any]] = {}
 
 
+class ControllerElementInput(BaseModel):
+    Name: str = Field(..., min_length=1)
+    Symbol: str = Field(..., min_length=1)
+    Atomic_number: int = Field(0, ge=0)
+    Standard_atomic_weight: float = Field(0.0, ge=0.0)
+    Density: Optional[float] = Field(None, gt=0.0)
+    Percentage: Optional[float] = Field(None, gt=0.0)
+    NAtoms: Optional[int] = Field(None, gt=0)
+
+
+class ControllerMaterialInput(BaseModel):
+    Name: str = Field(..., min_length=1)
+    Description: str = ""
+    Width: float = Field(..., gt=0.0)
+    Elements: List[ControllerElementInput] = Field(default_factory=list)
+    Density: Optional[float] = Field(None, gt=0.0)
+    isCompound: bool = False
+    NistName: Optional[str] = None
+
+    @model_validator(mode="after")
+    def validate_material_payload(self) -> "ControllerMaterialInput":
+        if self.NistName:
+            return self
+        if not self.Elements:
+            raise ValueError(f"Material '{self.Name}' requires Elements or NistName")
+        if self.isCompound:
+            if self.Density is None:
+                raise ValueError(f"Compound material '{self.Name}' requires Density")
+            for element in self.Elements:
+                if element.NAtoms is None:
+                    raise ValueError(
+                        f"Compound material '{self.Name}' requires NAtoms for element '{element.Symbol}'"
+                    )
+        else:
+            for element in self.Elements:
+                if element.Density is None:
+                    raise ValueError(
+                        f"Material '{self.Name}' requires element Density for '{element.Symbol}'"
+                    )
+                if element.Percentage is None:
+                    raise ValueError(
+                        f"Material '{self.Name}' requires element Percentage for '{element.Symbol}'"
+                    )
+        return self
+
+
+class ControllerScreenInput(BaseModel):
+    Name: str = Field(..., min_length=1)
+    Description: str = ""
+    Materials: List[ControllerMaterialInput] = Field(default_factory=list, min_length=1)
+
+
+class ControllerInputData(BaseModel):
+    Screen: ControllerScreenInput
+
+
 class SimulationRequest(BaseModel):
     task_id: int = 0
     particle: str = "He3"
@@ -38,7 +94,7 @@ class SimulationRequest(BaseModel):
     use_mixed_beam: bool = False
     events: int = 100
     collect_tracks: bool = False
-    input_data: Optional[dict] = None
+    input_data: Optional[ControllerInputData] = None
     world_xy_mm: float = 500.0
     world_z_mm: float = 500.0
     screen_xy_mm: float = 250.0
@@ -68,96 +124,87 @@ class SimulationStatus(BaseModel):
 
 
 def _build_report(result_dict: Dict[str, Any]) -> Dict[str, Any]:
-    total_particles   = int(result_dict.get("total_particles") or 0)
-    out_primary       = int(result_dict.get("total_out_primary_particles") or 0)
-    out_secondary     = int(result_dict.get("total_out_secondary_particles") or 0)
-    particle_results  = result_dict.get("particle_results") or {}
+    total_particles = int(result_dict.get("total_particles") or 0)
+    out_primary = int(result_dict.get("total_out_primary_particles") or 0)
+    out_secondary = int(result_dict.get("total_out_secondary_particles") or 0)
+    particle_results = result_dict.get("particle_results") or {}
     if total_particles <= 0 and particle_results:
-        total_particles = sum(
-            int(v.get("total_particles") or 0) for v in particle_results.values()
-        )
+        total_particles = sum(int(v.get("total_particles") or 0) for v in particle_results.values())
 
     stopped_primary = max(total_particles - out_primary, 0)
-    transmission    = (out_primary    / total_particles) if total_particles else 0.0
-    stopping_eff    = (stopped_primary / total_particles) if total_particles else 0.0
+    transmission = (out_primary / total_particles) if total_particles else 0.0
+    stopping_eff = (stopped_primary / total_particles) if total_particles else 0.0
 
-    screen_info      = result_dict.get("screen_info") or {}
-    materials        = screen_info.get("Materials") or []
-    energy_summary   = result_dict.get("energy_summary") or {}
-    electronics_let  = energy_summary.get("electronics_let") or {}
-    dose_assessment  = electronics_let.get("dose_assessment") or {}
-    fluence_atten    = energy_summary.get("fluence_attenuation") or {}
-    bragg            = energy_summary.get("bragg_peak") or {}
-    residual         = energy_summary.get("residual_energy") or {}
-    protection       = energy_summary.get("screen_protection_report") or {}
-    primary_stats    = energy_summary.get("primary_particles") or {}
-    secondary_stats  = energy_summary.get("secondary_particles") or {}
+    screen_info = result_dict.get("screen_info") or {}
+    materials = screen_info.get("Materials") or []
+    energy_summary = result_dict.get("energy_summary") or {}
+    electronics_let = energy_summary.get("electronics_let") or {}
+    dose_assessment = electronics_let.get("dose_assessment") or {}
+    fluence_atten = energy_summary.get("fluence_attenuation") or {}
+    bragg = energy_summary.get("bragg_peak") or {}
+    residual = energy_summary.get("residual_energy") or {}
+    protection = energy_summary.get("screen_protection_report") or {}
 
     layer_rows = []
     for idx, mat in enumerate(materials):
-        layer_rows.append({
-            "index":           idx + 1,
-            "name":            mat.get("Name", f"Layer_{idx + 1}"),
-            "thickness_mm":    float(mat.get("Thickness_mm", 0.0) or 0.0),
-            "primary_stuck":   int(mat.get("Primary_stuck_count", 0) or 0),
-            "secondary_stuck": int(mat.get("Secondary_stuck_count", 0) or 0),
-            "edep_mev":        float(mat.get("Edep", 0.0) or 0.0),
-        })
+        layer_rows.append(
+            {
+                "index": idx + 1,
+                "name": mat.get("Name", f"Layer_{idx + 1}"),
+                "thickness_mm": float(mat.get("Thickness_mm", 0.0) or 0.0),
+                "primary_stuck": int(mat.get("Primary_stuck_count", 0) or 0),
+                "secondary_stuck": int(mat.get("Secondary_stuck_count", 0) or 0),
+                "edep_mev": float(mat.get("Edep", 0.0) or 0.0),
+            }
+        )
 
     return {
-        # --- базовая статистика ---
-        "total_particles":          total_particles,
-        "out_primary_particles":    out_primary,
-        "out_secondary_particles":  out_secondary,
+        "total_particles": total_particles,
+        "out_primary_particles": out_primary,
+        "out_secondary_particles": out_secondary,
         "stopped_primary_particles": stopped_primary,
-        "transmission_rate":        transmission,
-        "stopping_efficiency":      stopping_eff,
-        "layers":                   layer_rows,
-        "electronics":              screen_info.get("Electronics"),
-        # --- коэффициент ослабления флюенса ---
+        "transmission_rate": transmission,
+        "stopping_efficiency": stopping_eff,
+        "layers": layer_rows,
+        "electronics": screen_info.get("Electronics"),
         "fluence_attenuation": {
-            "factor":              fluence_atten.get("fluence_attenuation_factor"),
-            "factor_percent":      fluence_atten.get("fluence_attenuation_percent"),
+            "factor": fluence_atten.get("fluence_attenuation_factor"),
+            "factor_percent": fluence_atten.get("fluence_attenuation_percent"),
             "stopping_efficiency_percent": fluence_atten.get("stopping_efficiency_percent"),
-            "primary_exited":      fluence_atten.get("primary_exited"),
-            "secondary_exited":    fluence_atten.get("secondary_exited"),
-            "comment":             fluence_atten.get("comment"),
+            "primary_exited": fluence_atten.get("primary_exited"),
+            "secondary_exited": fluence_atten.get("secondary_exited"),
+            "comment": fluence_atten.get("comment"),
         },
-        # --- пик Брэгга ---
         "bragg_peak": {
-            "inside_fraction":      bragg.get("inside_fraction"),
-            "inside_percent":       bragg.get("inside_percent"),
-            "stopped_inside":       bragg.get("stopped_inside_screen"),
-            "stopped_after":        bragg.get("stopped_after_screen"),
-            "mean_stop_depth_mm":   bragg.get("mean_stop_depth_mm"),
-            "screen_thick_enough":  bragg.get("screen_thick_enough"),
-            "comment":              bragg.get("comment"),
+            "inside_fraction": bragg.get("inside_fraction"),
+            "inside_percent": bragg.get("inside_percent"),
+            "stopped_inside": bragg.get("stopped_inside_screen"),
+            "stopped_after": bragg.get("stopped_after_screen"),
+            "mean_stop_depth_mm": bragg.get("mean_stop_depth_mm"),
+            "screen_thick_enough": bragg.get("screen_thick_enough"),
+            "comment": bragg.get("comment"),
         },
-        # --- остаточная энергия ---
         "residual_energy": {
-            "primary_exit_mean_mev":   residual.get("primary_exit", {}).get("mean_mev"),
-            "primary_exit_max_mev":    residual.get("primary_exit", {}).get("max_mev"),
-            "primary_exit_count":      residual.get("primary_exit", {}).get("count"),
+            "primary_exit_mean_mev": residual.get("primary_exit", {}).get("mean_mev"),
+            "primary_exit_max_mev": residual.get("primary_exit", {}).get("max_mev"),
+            "primary_exit_count": residual.get("primary_exit", {}).get("count"),
             "secondary_exit_mean_mev": residual.get("secondary_exit", {}).get("mean_mev"),
-            "by_particle_type":        residual.get("by_particle_type"),
+            "by_particle_type": residual.get("by_particle_type"),
         },
-        # --- LET и доза ---
-        "dose_gy":                    electronics_let.get("absorbed_dose_gy"),
-        "dose_threshold_gy":          electronics_let.get("dose_threshold_gy"),
-        "dose_verdict":               dose_assessment.get("verdict"),
-        "let_mev_cm2_mg":             electronics_let.get("max_let_mev_cm2_mg"),
-        "let_avg_mev_cm2_mg":         electronics_let.get("avg_let_mev_cm2_mg"),
-        "let_threshold_mev_cm2_mg":   electronics_let.get("threshold_mev_cm2_mg"),
-        "let_verdict":                electronics_let.get("risk_level"),
-        # --- итоговый вердикт ---
-        "shield_verdict":     protection.get("verdict"),
-        "shield_is_protected":protection.get("is_protected"),
-        "shield_reason":      protection.get("reason"),
-        "shield_criteria":    protection.get("criteria"),
-        # --- полная аналитика ---
-        "energy_summary":     energy_summary,
-        "particle_results":   particle_results,
-        "comparison":         result_dict.get("comparison"),
+        "dose_gy": electronics_let.get("absorbed_dose_gy"),
+        "dose_threshold_gy": electronics_let.get("dose_threshold_gy"),
+        "dose_verdict": dose_assessment.get("verdict"),
+        "let_mev_cm2_mg": electronics_let.get("max_let_mev_cm2_mg"),
+        "let_avg_mev_cm2_mg": electronics_let.get("avg_let_mev_cm2_mg"),
+        "let_threshold_mev_cm2_mg": electronics_let.get("threshold_mev_cm2_mg"),
+        "let_verdict": electronics_let.get("risk_level"),
+        "shield_verdict": protection.get("verdict"),
+        "shield_is_protected": protection.get("is_protected"),
+        "shield_reason": protection.get("reason"),
+        "shield_criteria": protection.get("criteria"),
+        "energy_summary": energy_summary,
+        "particle_results": particle_results,
+        "comparison": result_dict.get("comparison"),
     }
 
 
@@ -322,13 +369,13 @@ async def simulate(request: SimulationRequest, background_tasks: BackgroundTasks
     simulation_statuses[simulation_id] = {
         "simulation_id": simulation_id,
         "status": "pending",
-        "request": request.model_dump(),
+        "request": request.model_dump(mode="json"),
         "created_at": datetime.now().isoformat(),
         "completed_at": None,
         "result": None,
         "error": None,
     }
-    background_tasks.add_task(monitor_simulation, simulation_id, request.model_dump())
+    background_tasks.add_task(monitor_simulation, simulation_id, request.model_dump(mode="json"))
     return SimulationResponse(
         simulation_id=simulation_id,
         status="started",

@@ -3,6 +3,8 @@ const defaultLayers = [
     name: "Ti layer",
     description: "Titanium layer",
     width_um: 3000,
+    material_type: "metal",
+    density_g_cm3: null,
     elements: [
       {
         name: "Titanium",
@@ -11,22 +13,21 @@ const defaultLayers = [
         standard_atomic_weight: 47.87,
         density_g_cm3: 4.5,
         percentage: 100,
+        n_atoms: null,
       },
     ],
   },
   {
-    name: "W layer",
-    description: "Tungsten layer",
-    width_um: 2000,
+    name: "Kapton",
+    description: "Polyimide compound layer",
+    width_um: 1000,
+    material_type: "compound",
+    density_g_cm3: 1.42,
     elements: [
-      {
-        name: "Tungsten",
-        symbol: "W",
-        atomic_number: 74,
-        standard_atomic_weight: 183.84,
-        density_g_cm3: 19.25,
-        percentage: 100,
-      },
+      { name: "Carbon", symbol: "C", atomic_number: 6, standard_atomic_weight: 12.011, density_g_cm3: null, percentage: null, n_atoms: 22 },
+      { name: "Hydrogen", symbol: "H", atomic_number: 1, standard_atomic_weight: 1.008, density_g_cm3: null, percentage: null, n_atoms: 10 },
+      { name: "Nitrogen", symbol: "N", atomic_number: 7, standard_atomic_weight: 14.007, density_g_cm3: null, percentage: null, n_atoms: 2 },
+      { name: "Oxygen", symbol: "O", atomic_number: 8, standard_atomic_weight: 15.999, density_g_cm3: null, percentage: null, n_atoms: 5 },
     ],
   },
 ];
@@ -34,9 +35,7 @@ const defaultLayers = [
 let layerCounter = 0;
 let availableParticles = ["He3", "e-", "proton", "alpha", "neutron", "gamma"];
 let defaultParticle = "He3";
-const defaultBeamParticles = [
-  { name: "He3", energy_mev: 40, weight: 1 }
-];
+const defaultBeamParticles = [{ name: "He3", energy_mev: 40, weight: 1 }];
 
 function setStatus(text, ok = true) {
   const s = document.getElementById("status");
@@ -44,15 +43,32 @@ function setStatus(text, ok = true) {
   s.textContent = text;
 }
 
-function addElementRow(tableBody, element = null) {
-  const el = element || {
+function getDefaultElement(materialType) {
+  if (materialType === "compound") {
+    return {
+      name: "",
+      symbol: "C",
+      atomic_number: 6,
+      standard_atomic_weight: 12.011,
+      density_g_cm3: null,
+      percentage: null,
+      n_atoms: 1,
+    };
+  }
+
+  return {
     name: "",
     symbol: "Al",
     atomic_number: 13,
     standard_atomic_weight: 26.98,
     density_g_cm3: 2.7,
     percentage: 100,
+    n_atoms: null,
   };
+}
+
+function addElementRow(tableBody, materialType, element = null) {
+  const el = element || getDefaultElement(materialType);
   const row = document.createElement("tr");
   row.className = "element-row";
   row.innerHTML = `
@@ -60,10 +76,54 @@ function addElementRow(tableBody, element = null) {
     <td><input data-field="symbol" value="${el.symbol ?? ""}"></td>
     <td><input data-field="atomic_number" type="number" value="${el.atomic_number ?? 0}" min="0" step="1"></td>
     <td><input data-field="standard_atomic_weight" type="number" value="${el.standard_atomic_weight ?? 0}" min="0" step="0.0001"></td>
-    <td><input data-field="density_g_cm3" type="number" value="${el.density_g_cm3 ?? 0}" min="0" step="0.0001"></td>
-    <td><input data-field="percentage" type="number" value="${el.percentage ?? 0}" min="0.0001" step="0.1"></td>
+    <td data-col="density"><input data-field="density_g_cm3" type="number" value="${el.density_g_cm3 ?? ""}" min="0" step="0.0001"></td>
+    <td data-col="percentage"><input data-field="percentage" type="number" value="${el.percentage ?? ""}" min="0.0001" step="0.1"></td>
+    <td data-col="n_atoms"><input data-field="n_atoms" type="number" value="${el.n_atoms ?? ""}" min="1" step="1"></td>
   `;
   tableBody.appendChild(row);
+}
+
+function updateElementRowsForType(card, materialType) {
+  const rows = card.querySelectorAll(".element-row");
+  rows.forEach((row) => {
+    const densityInput = row.querySelector('[data-field="density_g_cm3"]');
+    const percentageInput = row.querySelector('[data-field="percentage"]');
+    const nAtomsInput = row.querySelector('[data-field="n_atoms"]');
+
+    if (materialType === "compound") {
+      densityInput.value = "";
+      percentageInput.value = "";
+      nAtomsInput.value = nAtomsInput.value || "1";
+    } else {
+      densityInput.value = densityInput.value || "1";
+      percentageInput.value = percentageInput.value || "100";
+      nAtomsInput.value = "";
+    }
+  });
+}
+
+function applyLayerTypeState(card) {
+  const materialType = card.querySelector('[data-layer-field="material_type"]').value;
+  const isCompound = materialType === "compound";
+  card.dataset.materialType = materialType;
+
+  card.querySelectorAll('[data-col="density"]').forEach((cell) => cell.classList.toggle("hidden-col", isCompound));
+  card.querySelectorAll('[data-col="percentage"]').forEach((cell) => cell.classList.toggle("hidden-col", isCompound));
+  card.querySelectorAll('[data-col="n_atoms"]').forEach((cell) => cell.classList.toggle("hidden-col", !isCompound));
+
+  const materialDensityBlock = card.querySelector(".material-density-block");
+  if (materialDensityBlock) {
+    materialDensityBlock.classList.toggle("hidden-block", !isCompound);
+  }
+
+  const hint = card.querySelector(".layer-type-hint");
+  if (hint) {
+    hint.textContent = isCompound
+      ? "Compound: set material density and NAtoms for each element. Percentages are computed automatically."
+      : "Metal/alloy: set element density and percentage for each element.";
+  }
+
+  updateElementRowsForType(card, materialType);
 }
 
 function addLayer(layer = null) {
@@ -71,16 +131,9 @@ function addLayer(layer = null) {
     name: "Layer",
     description: "",
     width_um: 1000,
-    elements: [
-      {
-        name: "",
-        symbol: "Al",
-        atomic_number: 13,
-        standard_atomic_weight: 26.98,
-        density_g_cm3: 2.7,
-        percentage: 100,
-      },
-    ],
+    material_type: "metal",
+    density_g_cm3: null,
+    elements: [getDefaultElement("metal")],
   };
 
   layerCounter += 1;
@@ -101,7 +154,20 @@ function addLayer(layer = null) {
         <label>Width (um)</label>
         <input data-layer-field="width_um" type="number" value="${lay.width_um}" min="0.0001" step="1">
       </div>
+      <div>
+        <label>Material type</label>
+        <select data-layer-field="material_type">
+          <option value="metal" ${lay.material_type === "metal" ? "selected" : ""}>Metal</option>
+          <option value="alloy" ${lay.material_type === "alloy" ? "selected" : ""}>Alloy</option>
+          <option value="compound" ${lay.material_type === "compound" ? "selected" : ""}>Compound</option>
+        </select>
+      </div>
+      <div class="material-density-block">
+        <label>Material density (g/cm3)</label>
+        <input data-layer-field="density_g_cm3" type="number" value="${lay.density_g_cm3 ?? ""}" min="0.0001" step="0.0001">
+      </div>
     </div>
+    <div class="muted layer-type-hint"></div>
     <table class="elements">
       <thead>
         <tr>
@@ -109,8 +175,9 @@ function addLayer(layer = null) {
           <th>Symbol</th>
           <th>Atomic number</th>
           <th>Std atomic weight</th>
-          <th>Density (g/cm3)</th>
-          <th>Percentage</th>
+          <th data-col="density">Element density (g/cm3)</th>
+          <th data-col="percentage">Percentage</th>
+          <th data-col="n_atoms">NAtoms</th>
         </tr>
       </thead>
       <tbody></tbody>
@@ -122,11 +189,17 @@ function addLayer(layer = null) {
   `;
 
   const body = card.querySelector("tbody");
-  (lay.elements || []).forEach((el) => addElementRow(body, el));
+  (lay.elements || []).forEach((el) => addElementRow(body, lay.material_type, el));
   if (!body.children.length) {
-    addElementRow(body);
+    addElementRow(body, lay.material_type);
   }
+
+  card.querySelector('[data-layer-field="material_type"]').addEventListener("change", () => {
+    applyLayerTypeState(card);
+  });
+
   document.getElementById("layersContainer").appendChild(card);
+  applyLayerTypeState(card);
 }
 
 function removeLayer() {
@@ -140,7 +213,9 @@ function removeLayer() {
 function addElement(button) {
   const card = button.closest(".layer-card");
   const body = card.querySelector("tbody");
-  addElementRow(body);
+  const materialType = card.querySelector('[data-layer-field="material_type"]').value;
+  addElementRow(body, materialType);
+  applyLayerTypeState(card);
 }
 
 function removeElement(button) {
@@ -155,21 +230,40 @@ function removeElement(button) {
 function readLayers() {
   const cards = [...document.querySelectorAll(".layer-card")];
   return cards.map((card) => {
-    const name = card.querySelector('[data-layer-field="name"]').value.trim();
-    const description = card.querySelector('[data-layer-field="description"]').value.trim();
-    const width_um = Number(card.querySelector('[data-layer-field="width_um"]').value);
+    const getLayerValue = (field) => card.querySelector(`[data-layer-field="${field}"]`).value;
+    const material_type = getLayerValue("material_type");
+    const densityValue = getLayerValue("density_g_cm3");
     const elements = [...card.querySelectorAll(".element-row")].map((row) => {
       const getVal = (field) => row.querySelector(`[data-field="${field}"]`).value;
-      return {
+      const base = {
         name: getVal("name").trim(),
         symbol: getVal("symbol").trim(),
         atomic_number: Number(getVal("atomic_number")),
         standard_atomic_weight: Number(getVal("standard_atomic_weight")),
+      };
+
+      if (material_type === "compound") {
+        return {
+          ...base,
+          n_atoms: Number(getVal("n_atoms")),
+        };
+      }
+
+      return {
+        ...base,
         density_g_cm3: Number(getVal("density_g_cm3")),
         percentage: Number(getVal("percentage")),
       };
     });
-    return { name, description, width_um, elements };
+
+    return {
+      name: getLayerValue("name").trim(),
+      description: getLayerValue("description").trim(),
+      width_um: Number(getLayerValue("width_um")),
+      material_type,
+      density_g_cm3: material_type === "compound" && densityValue !== "" ? Number(densityValue) : null,
+      elements,
+    };
   });
 }
 
@@ -383,12 +477,11 @@ function initUi() {
   loadParticles();
 }
 
+window.addParticleFromUi = () => addParticleRow();
+window.removeParticleFromUi = () => removeParticleRow();
+
 if (document.readyState === "loading") {
   document.addEventListener("DOMContentLoaded", initUi);
 } else {
   initUi();
 }
-
-// Fallback handlers for inline onclick (more robust across page cache/reload issues)
-// window.addParticleFromUi = () => addParticleRow();
-// window.removeParticleFromUi = () => removeParticleRow();

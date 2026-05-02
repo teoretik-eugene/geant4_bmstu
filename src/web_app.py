@@ -3,13 +3,13 @@ from __future__ import annotations
 import os
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 import requests
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 AVAILABLE_PARTICLES = ["He3", "e-", "proton", "alpha", "neutron", "gamma"]
 WEB_CONTROLLER_URL = os.getenv("WEB_CONTROLLER_URL", "http://localhost:8000").rstrip("/")
@@ -19,6 +19,8 @@ ELEMENT_HINTS = {
     "H": {"name": "Hydrogen", "z": 1, "a": 1.008},
     "Be": {"name": "Beryllium", "z": 4, "a": 9.0122},
     "C": {"name": "Carbon", "z": 6, "a": 12.011},
+    "N": {"name": "Nitrogen", "z": 7, "a": 14.007},
+    "O": {"name": "Oxygen", "z": 8, "a": 15.999},
     "Al": {"name": "Aluminum", "z": 13, "a": 26.9815},
     "Si": {"name": "Silicon", "z": 14, "a": 28.085},
     "Ti": {"name": "Titanium", "z": 22, "a": 47.867},
@@ -27,6 +29,7 @@ ELEMENT_HINTS = {
     "W": {"name": "Tungsten", "z": 74, "a": 183.84},
     "Pb": {"name": "Lead", "z": 82, "a": 207.2},
 }
+MATERIAL_TYPES = {"metal", "alloy", "compound"}
 
 
 class ElementInput(BaseModel):
@@ -34,15 +37,43 @@ class ElementInput(BaseModel):
     symbol: str = Field(..., min_length=1, description="Element symbol")
     atomic_number: int = Field(0, ge=0)
     standard_atomic_weight: float = Field(0.0, ge=0.0)
-    density_g_cm3: float = Field(..., gt=0.0)
-    percentage: float = Field(..., gt=0.0)
+    density_g_cm3: Optional[float] = Field(None, gt=0.0)
+    percentage: Optional[float] = Field(None, gt=0.0)
+    n_atoms: Optional[int] = Field(None, gt=0)
 
 
 class LayerInput(BaseModel):
     name: str = Field(..., description="Layer name")
     description: str = Field("", description="Layer description")
     width_um: float = Field(..., gt=0.0, description="Layer thickness in micrometers")
+    material_type: Literal["metal", "alloy", "compound"] = Field("metal")
+    density_g_cm3: Optional[float] = Field(None, gt=0.0, description="Material density in g/cm3")
     elements: List[ElementInput] = Field(default_factory=list, min_length=1)
+
+    @model_validator(mode="after")
+    def validate_by_material_type(self) -> "LayerInput":
+        if self.material_type not in MATERIAL_TYPES:
+            raise ValueError(f"Unsupported material_type: {self.material_type}")
+
+        if self.material_type == "compound":
+            if self.density_g_cm3 is None:
+                raise ValueError("Compound layers require material density_g_cm3")
+            for element in self.elements:
+                if element.n_atoms is None:
+                    raise ValueError(
+                        f"Compound layer '{self.name}' requires n_atoms for element '{element.symbol}'"
+                    )
+        else:
+            if not any((element.percentage or 0) > 0 for element in self.elements):
+                raise ValueError(
+                    f"Layer '{self.name}' requires percentage values for metal/alloy elements"
+                )
+            for element in self.elements:
+                if element.density_g_cm3 is None:
+                    raise ValueError(
+                        f"Layer '{self.name}' requires density_g_cm3 for element '{element.symbol}'"
+                    )
+        return self
 
 
 class BeamParticleInput(BaseModel):
@@ -52,10 +83,8 @@ class BeamParticleInput(BaseModel):
 
 
 class RunRequest(BaseModel):
-    # Backward-compatible fields (single particle mode)
     particle: str = Field("He3")
     energy_mev: float = Field(40.0, gt=0)
-    # New multi-particle fields
     particles: List[BeamParticleInput] = Field(default_factory=list)
     use_mixed_beam: bool = False
     events: int = Field(100, ge=1, le=1_000_000)
@@ -73,7 +102,7 @@ class RunRequest(BaseModel):
     layers: List[LayerInput] = Field(default_factory=list, min_length=1)
 
 
-app = FastAPI(title="Shield Config Web UI", version="1.1.0")
+app = FastAPI(title="Shield Config Web UI", version="1.2.0")
 Path("out").mkdir(parents=True, exist_ok=True)
 APP_DIR = Path(__file__).resolve().parent
 WEB_DIR = APP_DIR / "web_ui"
@@ -81,7 +110,7 @@ app.mount("/out", StaticFiles(directory="out"), name="out")
 app.mount("/ui", StaticFiles(directory=str(WEB_DIR)), name="ui")
 
 
-def _element_to_input(el: ElementInput) -> Dict[str, Any]:
+def _element_to_input(el: ElementInput, material_type: str) -> Dict[str, Any]:
     symbol = el.symbol.strip()
     hint = ELEMENT_HINTS.get(symbol, {})
     element_name = (el.name or "").strip() or hint.get("name", symbol)
@@ -91,23 +120,32 @@ def _element_to_input(el: ElementInput) -> Dict[str, Any]:
         if el.standard_atomic_weight > 0
         else float(hint.get("a", 0.0))
     )
-    return {
+    result = {
         "Name": element_name,
         "Symbol": symbol,
         "Atomic_number": atomic_number,
         "Standard_atomic_weight": atomic_weight,
-        "Density": float(el.density_g_cm3),
-        "Percentage": float(el.percentage),
     }
+    if material_type == "compound":
+        result["NAtoms"] = int(el.n_atoms or 0)
+    else:
+        result["Density"] = float(el.density_g_cm3 or 0.0)
+        result["Percentage"] = float(el.percentage or 0.0)
+    return result
 
 
 def _layer_to_material(layer: LayerInput) -> Dict[str, Any]:
-    return {
+    material_type = layer.material_type
+    material: Dict[str, Any] = {
         "Name": layer.name.strip(),
         "Description": layer.description.strip(),
         "Width": float(layer.width_um),
-        "Elements": [_element_to_input(el) for el in layer.elements],
+        "Elements": [_element_to_input(el, material_type) for el in layer.elements],
     }
+    if material_type == "compound":
+        material["Density"] = float(layer.density_g_cm3 or 0.0)
+        material["isCompound"] = True
+    return material
 
 
 def _build_input_data(payload: RunRequest) -> Dict[str, Any]:
