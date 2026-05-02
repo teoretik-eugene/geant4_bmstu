@@ -387,69 +387,151 @@ def _plot_protection_summary(energy_summary: dict, out_dir: str) -> None:
     ax4.set_axis_off()
     ax4.set_title("Критерии защиты", fontsize=9, fontweight="bold", loc="left")
     rows = []
+    # C1–C6 в единой таблице; C6 не дублируется в отдельном блоке
     crit_order = ["C1_fluence_attenuation", "C2_bragg_peak_inside",
-                  "C3_dose", "C4_let", "C5_event_upset"]
+                  "C3_dose", "C4_let", "C5_event_upset", "C6_secondary_fluence"]
+
+    # Короткие метки критериев — чтобы не вылезали за рамки
+    crit_short = {
+        "C1_fluence_attenuation": "C1: Флюенс первичных",
+        "C2_bragg_peak_inside":   "C2: Bragg внутри",
+        "C3_dose":                "C3: Доза в электронике",
+        "C4_let":                 "C4: LET макс.",
+        "C5_event_upset":         "C5: Event upset",
+        "C6_secondary_fluence":   "C6: Вторичный флюенс",
+    }
+
     for k in crit_order:
-        v = criteria.get(k, {})
-        status = "✓ ОК" if v.get("passed", False) else "✗ НЕТ"
-        desc   = v.get("description", "")
+        v      = criteria.get(k, {})
+        passed = v.get("passed", False)
+        status = "✓" if passed else "✗"
         val    = v.get("value")
         thr    = v.get("threshold")
-        val_str = f"{val:.4g}" if isinstance(val, float) else str(val)
-        thr_str = f"{thr:.4g}" if isinstance(thr, float) else str(thr)
-        rows.append([status, k, val_str, thr_str, desc[:60]])
+        val_str = f"{val:.3g}" if isinstance(val, float) else str(val)
+        thr_str = f"{thr:.3g}" if isinstance(thr, float) else str(thr)
+        label   = crit_short.get(k, k)
+        rows.append([status, label, val_str, thr_str])
+
     if rows:
-        col_labels = ["Статус", "Критерий", "Значение", "Порог", "Описание"]
+        col_labels = ["✓/✗", "Критерий", "Значение", "Порог"]
+        col_widths  = [0.06, 0.46, 0.24, 0.24]   # относительная ширина колонок
         tbl = ax4.table(
             cellText=rows,
             colLabels=col_labels,
             cellLoc="left",
             loc="upper left",
-            bbox=[0, 0, 1, 1]
+            bbox=[0, 0.25, 1, 0.75]            # оставляем 25% снизу под текст провалов
         )
         tbl.auto_set_font_size(False)
-        tbl.set_fontsize(7.5)
+        tbl.set_fontsize(8)
         for (r, c), cell in tbl.get_celld().items():
             cell.set_edgecolor("#cccccc")
+            # Задаём ширину колонок вручную
+            cell.set_width(col_widths[c] if c < len(col_widths) else 0.1)
             if r == 0:
                 cell.set_facecolor("#dde3ea")
                 cell.set_text_props(fontweight="bold")
-            elif r > 0 and c == 0:
-                passed = rows[r - 1][0].startswith("✓")
-                cell.set_facecolor("#d5f5e3" if passed else "#fadbd8")
+            elif r > 0:
+                passed_row = rows[r - 1][0] == "✓"
+                if c == 0:
+                    cell.set_facecolor("#d5f5e3" if passed_row else "#fadbd8")
+                    cell.set_text_props(
+                        fontweight="bold",
+                        color="#1a7a3a" if passed_row else "#c0392b"
+                    )
 
-    # ── 5. Блок: LET и доза ──────────────────────────────────────────────
-    ax5 = fig.add_axes([0.65, 0.02, 0.33, 0.42])
+        # Текст с причинами провала под таблицей
+        failed_keys = [k for k in crit_order if not criteria.get(k, {}).get("passed", False)]
+        if failed_keys:
+            fail_lines = []
+            for k in failed_keys:
+                desc = criteria[k].get("description", "")
+                # Обрезаем до 90 символов с переносом
+                short = desc[:90] + ("…" if len(desc) > 90 else "")
+                fail_lines.append(f"• {short}")
+            fail_text = "\n".join(fail_lines)
+            ax4.text(
+                0.01, 0.22, fail_text,
+                transform=ax4.transAxes,
+                fontsize=6.5, color="#c0392b", va="top",
+                wrap=False, linespacing=1.4
+            )
+
+        # ── 5. Блок: LET и доза ──────────────────────────────────────────────
+    ax5 = fig.add_axes([0.65, 0.24, 0.33, 0.22])
     ax5.set_axis_off()
     ax5.set_title("Электроника", fontsize=9, fontweight="bold", loc="left")
     let_max  = elec_let.get("max_let_mev_cm2_mg")
     let_avg  = elec_let.get("avg_let_mev_cm2_mg")
     dose_gy  = elec_let.get("absorbed_dose_gy")
+    dose_per_hit = elec_let.get("dose_per_hit_event_gy")
     edep_mev = elec_let.get("deposited_energy_mev")
     residual_primary = residual.get("primary_exit", {})
     lines = [
-        ("Max LET (MeV·cm²/mg)",  f"{let_max:.4f}"  if let_max  is not None else "—"),
-        ("Avg LET (MeV·cm²/mg)",  f"{let_avg:.4f}"  if let_avg  is not None else "—"),
-        ("Доза (Gy)",              f"{dose_gy:.4e}"  if dose_gy  is not None else "—"),
-        ("Edep (MeV)",             f"{edep_mev:.4f}" if edep_mev is not None else "—"),
-        ("", ""),
-        ("Остат. энергия (среднее)",
-         f"{residual_primary.get('mean_mev'):.2f} МэВ"
-         if residual_primary.get("mean_mev") is not None else "—"),
+        ("Max LET (MeV·cm²/mg)",  f"{let_max:.4f}"     if let_max      is not None else "—"),
+        ("Avg LET (MeV·cm²/mg)",  f"{let_avg:.4f}"     if let_avg      is not None else "—"),
+        ("Доза суммарная (Gy)",    f"{dose_gy:.4e}"     if dose_gy      is not None else "—"),
+        ("Доза/хит-событие (Gy)",  f"{dose_per_hit:.4e}" if dose_per_hit is not None else "—"),
+        ("Edep (MeV)",             f"{edep_mev:.4f}"    if edep_mev     is not None else "—"),
         ("Прошло первичных",       str(residual_primary.get("count", 0))),
-        ("Bragg peak внутри",
-         f"{bragg.get('inside_percent', 0.0):.1f}%"),
+        ("Bragg peak внутри",      f"{bragg.get('inside_percent', 0.0):.1f}%"),
     ]
     y = 0.93
     for label, value in lines:
-        if label == "":
-            y -= 0.06
-            continue
-        ax5.text(0.02, y, label + ":", fontsize=8, color="#555",
+        ax5.text(0.02, y, label + ":", fontsize=7.5, color="#555",
                  transform=ax5.transAxes, va="top")
-        ax5.text(0.62, y, value, fontsize=8, fontweight="bold", color="#222",
+        ax5.text(0.65, y, value, fontsize=7.5, fontweight="bold", color="#222",
                  transform=ax5.transAxes, va="top")
-        y -= 0.11
+        y -= 0.135
+
+    # ── 6. Блок: вторичное излучение ─────────────────────────────────────
+    # ── 6. Блок: вторичное излучение (числовые данные + барплот по типам) ──
+    fa        = fluence
+    spr_pct   = fa.get("secondary_production_percent", 0.0) or 0.0
+    spr_thr_p = fa.get("secondary_fluence_threshold_pct", 10.0) or 10.0
+    n_sec     = fa.get("secondary_exited", 0) or 0
+    n_ev      = fa.get("events_total", 0) or 0
+    by_type   = residual.get("by_particle_type") or {}
+
+    # Если есть данные по типам — рисуем барплот внизу и текст над ним
+    if by_type:
+        type_names       = list(by_type.keys())[:6]
+        type_counts_vals = [by_type[t].get("count", 0) for t in type_names]
+        has_bar = any(v > 0 for v in type_counts_vals)
+    else:
+        has_bar = False
+
+    # Позиции: если есть барплот — текстовый блок выше
+    ax6_y     = 0.13 if has_bar else 0.02
+    ax6_h     = 0.20
+    ax6 = fig.add_axes([0.65, ax6_y, 0.33, ax6_h])
+    ax6.set_axis_off()
+    ax6.set_title("Вторичное излучение за экраном", fontsize=9, fontweight="bold", loc="left")
+
+    sec_lines = [
+        ("Вторичных за экраном", f"{n_sec} шт."),
+        ("SPR (от событий)",      f"{spr_pct:.2f}%  (порог {spr_thr_p:.0f}%)"),
+        ("Всего событий",         str(n_ev)),
+    ]
+    y6 = 0.78
+    for label, value in sec_lines:
+        ax6.text(0.02, y6, label + ":", fontsize=7.5, color="#555",
+                 transform=ax6.transAxes, va="top")
+        ax6.text(0.62, y6, value, fontsize=7.5, fontweight="bold",
+                 color="#222", transform=ax6.transAxes, va="top")
+        y6 -= 0.24
+
+    # Барплот типов частиц под текстовым блоком
+    if has_bar:
+        ax6_bar = fig.add_axes([0.65, 0.02, 0.33, 0.10])
+        bar_colors = [get_particle_color(t) for t in type_names]
+        ax6_bar.barh(type_names, type_counts_vals,
+                     color=bar_colors, alpha=0.80, height=0.5)
+        ax6_bar.set_xlabel("Кол-во", fontsize=7)
+        ax6_bar.tick_params(axis="y", labelsize=7)
+        ax6_bar.tick_params(axis="x", labelsize=7)
+        ax6_bar.set_title("Типы частиц за экраном", fontsize=7, loc="left")
+        ax6_bar.grid(axis="x", alpha=0.3)
 
     plt.savefig(
         os.path.join(out_dir, "protection_summary.png"),

@@ -56,6 +56,12 @@ class SimulationConfig:
     electronics_material: str = "G4_Si"
     electronics_let_threshold_mev_cm2_mg: float = 1.0
     electronics_dose_threshold_gy: float = 5.0
+    # Критерий C6: порог вторичного флюенса.
+    # secondary_fluence_threshold — максимально допустимая доля вторичных частиц,
+    # прошедших экран, от общего числа событий (SPR = n_secondary_exited / events).
+    # Например, 0.10 означает: если более 10% событий породили вторичную частицу
+    # за экраном — экран не защищает.
+    secondary_fluence_threshold: float = 0.10
     collect_tracks: bool = False
     visualize: bool = False
 

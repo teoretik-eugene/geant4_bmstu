@@ -1113,7 +1113,8 @@ class SingleProcessSimulationRunner:
             absorbed_dose_gy_override=(
                 tracks.electronics_dose_gy_total
                 if tracks.electronics_dose_events > 0 else None
-            )
+            ),
+            secondary_fluence_threshold=cfg.secondary_fluence_threshold
         )
         logging.info(f'energy summary: {energy_summary}')
 
@@ -1495,7 +1496,8 @@ def _compute_energy_summary(
     electronics_info: Optional[dict] = None,
     let_threshold_mev_cm2_mg: float = 1.0,
     dose_threshold_gy: float = 5.0,
-    absorbed_dose_gy_override: Optional[float] = None
+    absorbed_dose_gy_override: Optional[float] = None,
+    secondary_fluence_threshold: float = 0.10
 ) -> dict:
     """Вычисляет сводную статистику по энергии.
 
@@ -1752,13 +1754,24 @@ def _compute_energy_summary(
     # чтобы не давать ложный вердикт "not_protected" при отсутствии электроники.
     electronics_absent = not bool(electronics_let)
 
+    # ------------------------------------------------------------------ #
+    # Критерий C6: Secondary Production Ratio (SPR)                      #
+    # SPR = n_secondary_exited / events                                  #
+    # Показывает долю событий, породивших хотя бы одну вторичную         #
+    # частицу ЗА экраном. Высокий SPR означает, что экран сам является   #
+    # источником вторичного излучения (тормозное, нейтроны, гаммы и т.д) #
+    # даже при хорошем задержании первичных частиц.                      #
+    # ------------------------------------------------------------------ #
+    secondary_production_ratio = n_secondary_exited / events if events > 0 else 0.0
+
     c1_fluence_ok = fluence_attenuation_factor <= FAF_THRESHOLD
     c2_bragg_ok   = bragg_inside_fraction >= BRAGG_INSIDE_THRESHOLD
     c3_dose_ok    = electronics_absent or dose_assessment.get("is_protected", False)
     c4_let_ok     = electronics_absent or (not electronics_let.get("is_dangerous", False))
     c5_upset_ok   = electronics_absent or (event_upset_risk.get("upset_events_count", 0) == 0)
+    c6_secondary_ok = secondary_production_ratio <= secondary_fluence_threshold
 
-    screen_protected = c1_fluence_ok and c2_bragg_ok and c3_dose_ok and c4_let_ok and c5_upset_ok
+    screen_protected = c1_fluence_ok and c2_bragg_ok and c3_dose_ok and c4_let_ok and c5_upset_ok and c6_secondary_ok
 
     criteria_details = {
         "C1_fluence_attenuation": {
@@ -1797,7 +1810,7 @@ def _compute_energy_summary(
                 else electronics_let.get("reason", "Нет данных о LET")
             )
         },
-        "C5_event_upset": {
+                "C5_event_upset": {
             "passed": c5_upset_ok,
             "value": event_upset_risk.get("upset_events_count", 0),
             "threshold": 0,
@@ -1805,6 +1818,17 @@ def _compute_energy_summary(
                 "Электроника не задана — критерий не применяется."
                 if electronics_absent
                 else f"Событий с опасным LET: {event_upset_risk.get('upset_events_count', 0)}"
+            )
+        },
+        "C6_secondary_fluence": {
+            "passed": c6_secondary_ok,
+            "value": secondary_production_ratio,
+            "threshold": secondary_fluence_threshold,
+            "description": (
+                f"Доля событий с вторичными частицами за экраном: "
+                f"{secondary_production_ratio * 100:.2f}% "
+                f"(порог <= {secondary_fluence_threshold * 100:.0f}%, "
+                f"абс.: {n_secondary_exited} из {events} событий)"
             )
         },
     }
@@ -1815,7 +1839,9 @@ def _compute_energy_summary(
         protection_reason  = (
             "Экран признан защитным: все критерии выполнены — "
             "коэффициент ослабления флюенса в норме, пик Брэгга внутри экрана, "
-            "доза и LET в электронике ниже порогов, event upset не выявлен."
+            "доза и LET в электронике ниже порогов, event upset не выявлен, "
+            f"вторичный флюенс за экраном в норме ({secondary_production_ratio * 100:.2f}% "
+            f"<= {secondary_fluence_threshold * 100:.0f}%)."
         )
     else:
         protection_verdict = "not_protected"
@@ -1898,17 +1924,23 @@ def _compute_energy_summary(
             ),
         },
         # --- коэффициент ослабления флюенса ---
-        "fluence_attenuation": {
-            "events_total":               events,
-            "primary_exited":             n_primary_exited,
-            "secondary_exited":           n_secondary_exited,
-            "fluence_attenuation_factor": fluence_attenuation_factor,
-            "fluence_attenuation_percent":fluence_attenuation_factor * 100.0,
-            "fluence_attenuation_coeff":  fluence_attenuation_coeff,
-            "stopping_efficiency_percent":fluence_attenuation_coeff * 100.0,
+            "fluence_attenuation": {
+            "events_total":                   events,
+            "primary_exited":                 n_primary_exited,
+            "secondary_exited":               n_secondary_exited,
+            "fluence_attenuation_factor":      fluence_attenuation_factor,
+            "fluence_attenuation_percent":     fluence_attenuation_factor * 100.0,
+            "fluence_attenuation_coeff":       fluence_attenuation_coeff,
+            "stopping_efficiency_percent":     fluence_attenuation_coeff * 100.0,
+            "secondary_production_ratio":      secondary_production_ratio,
+            "secondary_production_percent":    secondary_production_ratio * 100.0,
+            "secondary_fluence_threshold":     secondary_fluence_threshold,
+            "secondary_fluence_threshold_pct": secondary_fluence_threshold * 100.0,
             "comment": (
                 f"Экран задержал {fluence_attenuation_coeff * 100:.1f}% первичных частиц "
-                f"({events - n_primary_exited} из {events})."
+                f"({events - n_primary_exited} из {events}). "
+                f"Вторичных за экраном: {n_secondary_exited} "
+                f"({secondary_production_ratio * 100:.2f}% от событий)."
             ),
         },
         # --- остаточная энергия ---
@@ -1959,13 +1991,18 @@ class SimulationRunner:
             raise ValueError("Either task_id or input_data must be provided")
         particle_results = {}
 
-        all_energy_profiles = {}
-        all_exit_energies = []
+        all_energy_profiles  = {}
+        all_exit_energies    = []
         all_electronics_hits = []
-        all_screen_info = None
-        all_energy_summary = {}
+        all_screen_info      = None
+        all_energy_summary   = {}
         all_absorbed_dose_gy = 0.0
         has_absorbed_dose_gy = False
+        # Суммируем реально выполненные события по всем подпрогонам.
+        # cfg.events — события одного прогона; при N частицах суммарно N×events.
+        # Используем фактическое число из result_dict["total_particles"],
+        # чтобы корректно обработать прогоны, завершившиеся с ошибкой.
+        all_total_events = 0
 
         logging.info(f"simulation config: {cfg}")
         # Создаем конфиги для каждой частицы
@@ -1987,6 +2024,7 @@ class SimulationRunner:
                 electronics_material=cfg.electronics_material,
                 electronics_let_threshold_mev_cm2_mg=cfg.electronics_let_threshold_mev_cm2_mg,
                 electronics_dose_threshold_gy=cfg.electronics_dose_threshold_gy,
+                secondary_fluence_threshold=cfg.secondary_fluence_threshold,
                 collect_tracks=cfg.collect_tracks,
                 visualize=False,
                 use_mixed_beam=False
@@ -2029,9 +2067,11 @@ class SimulationRunner:
                         tracks=tracks
                     )
                     particle_results[key] = result
+                    # Накапливаем реально выполненные события этого подпрогона
+                    all_total_events += int(result_dict.get("total_particles") or 0)
                     # logging.info(f"cfg result: {particle_results[key]}")
                     print(f"Completed: {key}")
-                    logging.info(f"Completed: {key}")                  
+                    logging.info(f"Completed: {key}")                                    
 
                     if "energy_profiles" in result_dict and result_dict["energy_profiles"]:
                         for track_key, profiles in result_dict["energy_profiles"].items():
@@ -2151,10 +2191,18 @@ class SimulationRunner:
             electronics_info=(all_screen_info or {}).get("Electronics"),
             let_threshold_mev_cm2_mg=cfg.electronics_let_threshold_mev_cm2_mg,
             dose_threshold_gy=cfg.electronics_dose_threshold_gy,
-            events=cfg.events,
-            absorbed_dose_gy_override=(all_absorbed_dose_gy if has_absorbed_dose_gy else None)
+            # all_total_events — сумма реально выполненных событий по всем подпрогонам
+            # (N_частиц × cfg.events при успешном завершении всех прогонов).
+            # Используем cfg.events * len(cfg.particles) как запасной вариант
+            # если all_total_events не накопился (все прогоны упали с ошибкой).
+            events=all_total_events if all_total_events > 0 else cfg.events * len(cfg.particles),
+            absorbed_dose_gy_override=(all_absorbed_dose_gy if has_absorbed_dose_gy else None),
+            secondary_fluence_threshold=cfg.secondary_fluence_threshold
         )
-        logging.info(f'res emergy summary: {energy_summary}')
+        logging.info(
+            f'res energy summary (total_events={all_total_events}, '
+            f'particles={len(cfg.particles)}, events_per_run={cfg.events})'
+        )
 
         # Обновляем all_screen_info корректными данными из energy_summary
         if all_screen_info and "Materials" in all_screen_info:

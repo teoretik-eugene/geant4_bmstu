@@ -104,6 +104,7 @@ class SimulationRequest(BaseModel):
     electronics_material: str = "G4_Si"
     electronics_dose_threshold_gy: float = 5.0
     electronics_let_threshold_mev_cm2_mg: float = 1.0
+    secondary_fluence_threshold: float = 0.10
     build_energy_plots: bool = True
     build_3d_scene: bool = True
 
@@ -175,6 +176,23 @@ def _build_report(result_dict: Dict[str, Any]) -> Dict[str, Any]:
             "primary_exited": fluence_atten.get("primary_exited"),
             "secondary_exited": fluence_atten.get("secondary_exited"),
             "comment": fluence_atten.get("comment"),
+        },
+        "secondary_radiation": {
+            "secondary_exited": fluence_atten.get("secondary_exited"),
+            "events_total": fluence_atten.get("events_total"),
+            "secondary_production_ratio": fluence_atten.get("secondary_production_ratio"),
+            "secondary_production_percent": fluence_atten.get("secondary_production_percent"),
+            "threshold": fluence_atten.get("secondary_fluence_threshold"),
+            "threshold_percent": fluence_atten.get("secondary_fluence_threshold_pct"),
+            "c6_passed": (
+                protection.get("criteria", {}).get("C6_secondary_fluence", {}).get("passed")
+            ),
+            "c6_description": (
+                protection.get("criteria", {}).get("C6_secondary_fluence", {}).get("description")
+            ),
+            "by_particle_type": (
+                residual.get("by_particle_type")
+            ),
         },
         "bragg_peak": {
             "inside_fraction": bragg.get("inside_fraction"),
