@@ -105,6 +105,7 @@ class SimulationRequest(BaseModel):
     electronics_dose_threshold_gy: float = 5.0
     electronics_let_threshold_mev_cm2_mg: float = 1.0
     build_energy_plots: bool = True
+    build_3d_scene: bool = True
 
 
 class SimulationResponse(BaseModel):
@@ -212,17 +213,48 @@ def _build_generated_files(simulation_id: str, result_dir: str) -> List[Dict[str
     files: List[Dict[str, str]] = []
     analysis_dir = Path(result_dir) / "energy_analysis"
     if not analysis_dir.exists():
-        return files
+        analysis_pngs: List[Path] = []
+    else:
+        analysis_pngs = sorted(analysis_dir.glob("*.png"))
 
-    for path in sorted(analysis_dir.glob("*.png")):
+    for path in analysis_pngs:
         files.append(
             {
                 "name": path.name,
                 "abs_path": str(path.resolve()),
-                "url_path": f"/simulations/{simulation_id}/plots/{path.name}",
+                "url_path": f"/simulations/{simulation_id}/artifacts/{path.name}",
+                "kind": "plot",
+            }
+        )
+
+    for path in sorted(Path(result_dir).glob("simulation_task_*.html")):
+        files.append(
+            {
+                "name": path.name,
+                "abs_path": str(path.resolve()),
+                "url_path": f"/simulations/{simulation_id}/artifacts/{path.name}",
+                "kind": "scene_3d",
             }
         )
     return files
+
+
+def _build_visualization_result(result_data: Dict[str, Any]) -> SimpleNamespace:
+    particle_results: Dict[str, Any] = {}
+    for key, value in (result_data.get("particle_results") or {}).items():
+        particle_results[key] = SimpleNamespace(
+            particle=value.get("particle"),
+            tracks=value.get("tracks"),
+        )
+
+    return SimpleNamespace(
+        particle_results=particle_results or None,
+        tracks=result_data.get("tracks"),
+        screen_info=result_data.get("screen_info"),
+        energy_profiles=result_data.get("energy_profiles"),
+        exit_energies=result_data.get("exit_energies"),
+        energy_summary=result_data.get("energy_summary"),
+    )
 
 
 _SIM_CONFIG_FIELD_NAMES = {f.name for f in fields(SimulationConfig)}
@@ -316,6 +348,33 @@ with open(r\"{result_file}\", "w", encoding="utf-8") as f:
             except Exception as plot_exc:
                 logger.warning("Failed to build plots for %s: %s", simulation_id, plot_exc)
 
+        if bool(config_dict.get("build_3d_scene", True)):
+            try:
+                from vis_graph import (
+                    visualize_multi_particle_results,
+                    visualize_single_particle_results,
+                )
+
+                cfg = SimulationConfig(**_to_simulation_config_dict(config_dict))
+                scene_result = _build_visualization_result(result_data)
+                if result_data.get("particle_results"):
+                    visualize_multi_particle_results(
+                        cfg=cfg,
+                        result=scene_result,
+                        input_data=config_dict.get("input_data") or {},
+                        dir=result_dir,
+                    )
+                else:
+                    visualize_single_particle_results(
+                        cfg=cfg,
+                        result=scene_result,
+                        input_data=config_dict.get("input_data") or {},
+                        dir=result_dir,
+                    )
+                generated_files = _build_generated_files(simulation_id, result_dir)
+            except Exception as scene_exc:
+                logger.warning("Failed to build 3D scene for %s: %s", simulation_id, scene_exc)
+
         payload = {
             "result": result_data,
             "report": _build_report(result_data),
@@ -406,8 +465,8 @@ async def list_simulations(limit: int = 10, offset: int = 0):
     return result
 
 
-@app.get("/simulations/{simulation_id}/plots/{plot_name}")
-async def get_simulation_plot(simulation_id: str, plot_name: str):
+@app.get("/simulations/{simulation_id}/artifacts/{artifact_name}")
+async def get_simulation_artifact(simulation_id: str, artifact_name: str):
     sim_data = simulation_statuses.get(simulation_id)
     if not sim_data:
         raise HTTPException(status_code=404, detail="Simulation not found")
@@ -415,11 +474,15 @@ async def get_simulation_plot(simulation_id: str, plot_name: str):
     if not result_dir:
         raise HTTPException(status_code=404, detail="No artifacts for this simulation")
 
-    safe_name = os.path.basename(plot_name)
-    plot_path = Path(result_dir) / "energy_analysis" / safe_name
-    if not plot_path.exists():
-        raise HTTPException(status_code=404, detail="Plot not found")
-    return FileResponse(str(plot_path))
+    safe_name = os.path.basename(artifact_name)
+    candidates = [
+        Path(result_dir) / "energy_analysis" / safe_name,
+        Path(result_dir) / safe_name,
+    ]
+    for path in candidates:
+        if path.exists():
+            return FileResponse(str(path))
+    raise HTTPException(status_code=404, detail="Artifact not found")
 
 
 @app.delete("/simulations/{simulation_id}")
