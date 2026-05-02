@@ -100,7 +100,7 @@ class SimulationRequest(BaseModel):
     screen_xy_mm: float = 250.0
     first_screen_z_mm: float = 15.0
     electronics_gap_mm: float = 0.1
-    electronics_thickness_mm: float = 0.05
+    electronics_thickness_mm: float = 1.0
     electronics_material: str = "G4_Si"
     electronics_dose_threshold_gy: float = 5.0
     electronics_let_threshold_mev_cm2_mg: float = 1.0

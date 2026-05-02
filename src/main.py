@@ -658,7 +658,7 @@ class ElectronicsSensitiveDetector(g4.G4VSensitiveDetector):
         else:
             let_step_mev_cm2_mg = 0.0
 
-        # Исправление #8: LET вычисляется на СРЕДНЕЙ энергии шага (pre + post) / 2,
+                # Исправление #8: LET вычисляется на СРЕДНЕЙ энергии шага (pre + post) / 2,
         # а не только на pre_energy. Это физически корректнее, особенно в области
         # пика Брэгга, где энергия резко падает на протяжении одного шага.
         mid_energy_mev = (pre_energy_mev + post_energy_mev) / 2.0
@@ -670,6 +670,8 @@ class ElectronicsSensitiveDetector(g4.G4VSensitiveDetector):
             and mid_energy_mev > 0
             and density_g_cm3 > 0
         ):
+            # Заряженные частицы (протоны, ионы, электроны):
+            # LET считается через ComputeElectronicDEDX — наиболее точный метод.
             try:
                 dedx_internal = self.em_calculator.ComputeElectronicDEDX(
                     mid_energy_mev * g4.MeV,
@@ -685,6 +687,31 @@ class ElectronicsSensitiveDetector(g4.G4VSensitiveDetector):
                     mid_energy_mev,
                     exc
                 )
+                # Fallback: считаем через edep/step если шаг ненулевой
+                if step_length_mm > 1e-4 and density_g_cm3 > 0:
+                    let_step_mev_cm2_mg = (edep_mev / step_length_mm) / (density_g_cm3 * 100.0)
+                else:
+                    let_step_mev_cm2_mg = None
+        elif edep_mev > 0 and step_length_mm > 1e-4 and density_g_cm3 > 0:
+            # Нейтральные частицы (гаммы, нейтроны):
+            # ComputeElectronicDEDX не применим (нет заряда).
+            # Используем косвенную оценку: edep / step_length / density.
+            # Для гамм — это энергия Комптон-электронов и фотоэффекта, осаждённая локально.
+            # Для нейтронов — энергия ядер отдачи.
+            # Физический смысл: эффективный LET от вторичных ионизирующих частиц.
+            let_step_mev_cm2_mg = (edep_mev / step_length_mm) / (density_g_cm3 * 100.0)
+            logging.debug(
+                "Neutral particle LET (edep/step): particle=%s, edep=%.4e MeV, "
+                "step=%.4e mm, let=%.4e MeV*cm2/mg",
+                particle_name, edep_mev, step_length_mm, let_step_mev_cm2_mg
+            )
+        elif edep_mev > 0:
+            # Нейтральная частица с edep > 0 но шагом == 0
+            # (ядерное взаимодействие нейтрона — виртуальный шаг).
+            # LET не определён геометрически, но факт осаждения энергии регистрируем.
+            # Оставляем let = None, но хит всё равно попадёт в статистику дозы
+            # через edep_mev (который учитывается независимо от LET).
+            let_step_mev_cm2_mg = None
         else:
             let_step_mev_cm2_mg = None
 
@@ -1342,7 +1369,15 @@ def _compute_electronics_let_summary(
             edep_mev = float(hit.get("edep_mev", 0.0))
             mean_let_mev_cm2_mg = hit.get("mean_let_mev_cm2_mg")
             max_let_mev_cm2_mg = hit.get("max_let_mev_cm2_mg")
-            if mean_let_mev_cm2_mg is None and max_let_mev_cm2_mg is None:
+
+            # Включаем хит если:
+            # 1. Есть LET (заряженные частицы и нейтральные с ненулевым шагом), ИЛИ
+            # 2. Есть реальное осаждение энергии (гаммы/нейтроны с виртуальным шагом).
+            # Ранее нейтральные частицы без LET выбрасывались — они не учитывались
+            # в event_max_let и dose_per_hit_event_gy, хотя вносили вклад в дозу.
+            has_let  = mean_let_mev_cm2_mg is not None or max_let_mev_cm2_mg is not None
+            has_edep = edep_mev > 0
+            if not has_let and not has_edep:
                 continue
 
             valid_hits.append({
@@ -2296,17 +2331,32 @@ if __name__ == "__main__":
             "Name": "Экран из W и Ti",
             "Description": "Экран состоит из двух слоев: W и Ti.",
             "Materials": [
+                # {
+                #     "Name": "W",
+                #     "Description": "Вольфрам (W) толщиной 2000 мкм",
+                #     "Width": 500.0,
+                #     "Elements": [
+                #         {
+                #             "Name": "Вольфрам",
+                #             "Symbol": "W",
+                #             "Atomic_number": 74,
+                #             "Standard_atomic_weight": 183.84,
+                #             "Density": 19.25,
+                #             "Percentage": 100.0
+                #         }
+                #     ]
+                # },
                 {
-                    "Name": "W",
-                    "Description": "Вольфрам (W) толщиной 2000 мкм",
-                    "Width": 500.0,
+                    "Name": "Al",
+                    "Description": "Алюминий (Al) толщиной 1000 мкм",
+                    "Width": 1000.0,
                     "Elements": [
                         {
-                            "Name": "Вольфрам",
-                            "Symbol": "W",
-                            "Atomic_number": 74,
-                            "Standard_atomic_weight": 183.84,
-                            "Density": 19.25,
+                            "Name": "Алюминий",
+                            "Symbol": "Al",
+                            "Atomic_number": 13,
+                            "Standard_atomic_weight": 26.98,
+                            "Density": 2.7,
                             "Percentage": 100.0
                         }
                     ]
@@ -2360,15 +2410,15 @@ if __name__ == "__main__":
     Использовать для получения данных по task_id с сайта (раскоментировать строку)
     '''
     # data = ds.get_current_task_to_json(task_id)
-    events = 1_000
+    events = 10_000
     # Пример: Мульти-частичный последовательный режим
     cfg_multi = SimulationConfig(
         task_id=task_id,
         input_data=data,
         particles=[
             ParticleConfig(name="He3", energy_mev=30.0),
-            # ParticleConfig(name="e-", energy_mev=100.0),
-            # ParticleConfig(name="gamma", energy_mev=60.0),
+            # ParticleConfig(name="e-", energy_mev=10.0),
+            ParticleConfig(name="gamma", energy_mev=1.0),
             ParticleConfig(name="alpha", energy_mev=70.0),
             ParticleConfig(name="proton", energy_mev=30.0)
             # ParticleConfig(name="neutron", energy_mev=50.0)

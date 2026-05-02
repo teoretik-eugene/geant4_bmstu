@@ -50,9 +50,16 @@ class SimulationConfig:
     screen_xy_mm: float = 250.0
     first_screen_z_mm: float = 15.0
     electronics_gap_mm: float = 0.1
-    electronics_size_x_mm: float = 10.0
-    electronics_size_y_mm: float = 10.0
-    electronics_thickness_mm: float = 0.05
+    # Размер и толщина чувствительного объёма электроники.
+    # 20×20 мм — достаточно для захвата рассеянных частиц.
+    # 1.0 мм толщина — компромисс:
+    #   - заряженные частицы (He3/alpha/proton после экрана) останавливаются внутри
+    #   - гаммы 1 МэВ имеют вероятность взаимодействия ~1.6% (против 0.08% при 0.05 мм)
+    #   - не искажает геометрию экрана
+    # Для задач где нужна только доза от гамм — увеличить до 3–5 мм.
+    electronics_size_x_mm: float = 20.0
+    electronics_size_y_mm: float = 20.0
+    electronics_thickness_mm: float = 1.0
     electronics_material: str = "G4_Si"
     electronics_let_threshold_mev_cm2_mg: float = 1.0
     electronics_dose_threshold_gy: float = 5.0
