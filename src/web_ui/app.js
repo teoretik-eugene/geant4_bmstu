@@ -379,10 +379,10 @@ function renderFiles(files) {
     return;
   }
   holder.innerHTML = files
-    .map(
-      (f) =>
-        `<a href="${f.web_url}" target="_blank">${f.name}</a><div class="muted">${f.abs_path}</div>`,
-    )
+    .map((f) => {
+      const label = f.kind === "scene_3d" ? `3D scene: ${f.name}` : f.name;
+      return `<a href="${f.web_url}" target="_blank">${label}</a><div class="muted">${f.abs_path}</div>`;
+    })
     .join("");
 }
 
@@ -421,6 +421,7 @@ async function runSimulation() {
     electronics_dose_threshold_gy: Number(document.getElementById("dose_threshold").value),
     electronics_let_threshold_mev_cm2_mg: Number(document.getElementById("let_threshold").value),
     build_energy_plots: true,
+    build_3d_scene: true,
     layers: readLayers(),
   };
 
