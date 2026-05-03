@@ -1028,26 +1028,40 @@ def convert_screen_info_to_data(screen: ScreenInfo) -> dict:
         "Screen": screen.to_dict()
     }
 
-def run_simulation_with_giga(cfg: SimulationGigaConfig):
-    logging.info('run simulation with giga main')
-    load_dotenv()
-    GIGACHAT_CREDENTIALS = os.getenv('GIGACHAT_CREDENTIALS')
 
-    llm = GigaChat(
+def _create_screen_generation_llm() -> GigaChat:
+    load_dotenv()
+    giga_credentials = os.getenv("GIGACHAT_CREDENTIALS")
+    return GigaChat(
         model="GigaChat-2-Max",
-        credentials=GIGACHAT_CREDENTIALS,
+        credentials=giga_credentials,
         scope="GIGACHAT_API_PERS",
-        top_p=0, 
-        timeout=120, 
-        ca_bundle_file='russian_trusted_root_ca_pem.crt'
+        top_p=0,
+        timeout=120,
+        ca_bundle_file="russian_trusted_root_ca_pem.crt",
     )
 
-    structed_llm = llm.with_structured_output(ScreenInfo)
-    logging.info('request for llm')
-    result = structed_llm.invoke(cfg.prompt)
-    logging.info(result)
 
-    data = convert_screen_info_to_data(result)
+def generate_screen_config_with_giga(prompt: str) -> dict:
+    llm = _create_screen_generation_llm()
+    structured_llm = llm.with_structured_output(ScreenInfo)
+    full_prompt = (
+        "Сформируй конфигурацию защитного экрана для моделирования взаимодействия заряженных частиц с веществом. "
+        "Верни структуру экрана с явным составом каждого слоя. "
+        "Для металлов и сплавов укажи Elements с Percentage и Density у элементов. "
+        "Для химических соединений укажи Density на уровне материала, isCompound=true и NAtoms у каждого элемента. "
+        "Не используй NistName как единственный способ задания материала, если можно явно описать состав. "
+        "Толщину слоя указывай в микронах в поле Width. "
+        f"\n\nЗапрос пользователя:\n{prompt}"
+    )
+    logging.info("request for llm screen config")
+    result = structured_llm.invoke(full_prompt)
+    logging.info("llm screen config result: %s", result)
+    return convert_screen_info_to_data(result)
+
+def run_simulation_with_giga(cfg: SimulationGigaConfig):
+    logging.info('run simulation with giga main')
+    data = generate_screen_config_with_giga(cfg.prompt)
     logging.info(f'data: {data}')
 
     run_config = SimulationConfig(input_data=data, 
@@ -2346,54 +2360,54 @@ if __name__ == "__main__":
                 #         }
                 #     ]
                 # },
-                {
-                    "Name": "Al",
-                    "Description": "Алюминий (Al) толщиной 1000 мкм",
-                    "Width": 1000.0,
-                    "Elements": [
-                        {
-                            "Name": "Алюминий",
-                            "Symbol": "Al",
-                            "Atomic_number": 13,
-                            "Standard_atomic_weight": 26.98,
-                            "Density": 2.7,
-                            "Percentage": 100.0
-                        }
-                    ]
-                },
-                {
-                    "Name": "Pb",
-                    "Description": "Pb layer",
-                    "Width": 2000.0,
-                    "Elements": [
-                        {
-                            "Name": "Свинец",
-                            "Symbol": "Pb",
-                            "Atomic_number": 82,
-                            "Standard_atomic_weight": 207.2,
-                            "Density": 11.35,
-                            "Percentage": 100.0
-                        }
-                    ]
-                },
-                {
-                    "Name": "Be",
-                    "Description": "Be",
-                    "Width": 2000.0,
-                    "Elements": [
-                        {
-                            "Name": "Бериллий",
-                            "Symbol": "Be",
-                            "Atomic_number": 4,
-                            "Standard_atomic_weight": 9.012,
-                            "Density": 1.85,
-                            "Percentage": 100.0
-                        }
-                    ]
-                },
+                # {
+                #     "Name": "Al",
+                #     "Description": "Алюминий (Al) толщиной 1000 мкм",
+                #     "Width": 1000.0,
+                #     "Elements": [
+                #         {
+                #             "Name": "Алюминий",
+                #             "Symbol": "Al",
+                #             "Atomic_number": 13,
+                #             "Standard_atomic_weight": 26.98,
+                #             "Density": 2.7,
+                #             "Percentage": 100.0
+                #         }
+                #     ]
+                # },
+                # {
+                #     "Name": "Pb",
+                #     "Description": "Pb layer",
+                #     "Width": 2000.0,
+                #     "Elements": [
+                #         {
+                #             "Name": "Свинец",
+                #             "Symbol": "Pb",
+                #             "Atomic_number": 82,
+                #             "Standard_atomic_weight": 207.2,
+                #             "Density": 11.35,
+                #             "Percentage": 100.0
+                #         }
+                #     ]
+                # },
+                # {
+                #     "Name": "Be",
+                #     "Description": "Be",
+                #     "Width": 2000.0,
+                #     "Elements": [
+                #         {
+                #             "Name": "Бериллий",
+                #             "Symbol": "Be",
+                #             "Atomic_number": 4,
+                #             "Standard_atomic_weight": 9.012,
+                #             "Density": 1.85,
+                #             "Percentage": 100.0
+                #         }
+                #     ]
+                # },
                 {
                     "Name": "Kapton",
-                    "Width": 5000.0,
+                    "Width": 1000.0,
                     "Density": 1.42,
                     "isCompound": True,
                     "Elements": [
@@ -2410,17 +2424,17 @@ if __name__ == "__main__":
     Использовать для получения данных по task_id с сайта (раскоментировать строку)
     '''
     # data = ds.get_current_task_to_json(task_id)
-    events = 10_000
+    events = 1_000
     # Пример: Мульти-частичный последовательный режим
     cfg_multi = SimulationConfig(
         task_id=task_id,
         input_data=data,
         particles=[
-            ParticleConfig(name="He3", energy_mev=30.0),
-            # ParticleConfig(name="e-", energy_mev=10.0),
-            ParticleConfig(name="gamma", energy_mev=1.0),
-            ParticleConfig(name="alpha", energy_mev=70.0),
-            ParticleConfig(name="proton", energy_mev=30.0)
+            # ParticleConfig(name="He3", energy_mev=30.0),
+            ParticleConfig(name="e-", energy_mev=10.0),
+            ParticleConfig(name="gamma", energy_mev=20.0)
+            # ParticleConfig(name="alpha", energy_mev=70.0),
+            # ParticleConfig(name="proton", energy_mev=30.0)
             # ParticleConfig(name="neutron", energy_mev=50.0)
         ],
         events=events,

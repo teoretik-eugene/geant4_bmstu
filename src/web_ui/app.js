@@ -37,6 +37,11 @@ let availableParticles = ["He3", "e-", "proton", "alpha", "neutron", "gamma"];
 let defaultParticle = "He3";
 const defaultBeamParticles = [{ name: "He3", energy_mev: 40, weight: 1 }];
 
+const defaultScreenMeta = {
+  screen_name: "Web Configured Screen",
+  screen_description: "Editable screen configuration",
+};
+
 function setStatus(text, ok = true) {
   const s = document.getElementById("status");
   s.className = "status " + (ok ? "ok" : "err");
@@ -267,6 +272,30 @@ function readLayers() {
   });
 }
 
+function setScreenMeta(screenName, screenDescription) {
+  const nameInput = document.getElementById("screen_name");
+  const descriptionInput = document.getElementById("screen_description");
+  if (nameInput) nameInput.value = screenName ?? defaultScreenMeta.screen_name;
+  if (descriptionInput) descriptionInput.value = screenDescription ?? "";
+}
+
+function replaceLayers(layers) {
+  const container = document.getElementById("layersContainer");
+  if (!container) return;
+  container.innerHTML = "";
+  layerCounter = 0;
+  (layers || []).forEach((layer) => addLayer(layer));
+  if (!layers || !layers.length) {
+    addLayer();
+  }
+}
+
+function applyGeneratedScreenConfig(formData) {
+  if (!formData) return;
+  setScreenMeta(formData.screen_name, formData.screen_description);
+  replaceLayers(formData.layers || []);
+}
+
 function buildParticleOptions(selected) {
   return availableParticles
     .map((p) => `<option value="${p}" ${p === selected ? "selected" : ""}>${p}</option>`)
@@ -398,6 +427,37 @@ async function loadParticles() {
   const body = document.querySelector("#particlesTable tbody");
   body.innerHTML = "";
   defaultBeamParticles.forEach((p) => addParticleRow(p));
+  setScreenMeta(defaultScreenMeta.screen_name, defaultScreenMeta.screen_description);
+}
+
+async function generateScreenWithAi() {
+  const prompt = document.getElementById("screenPrompt").value.trim();
+  if (!prompt) {
+    setStatus("Error: enter a prompt for the AI screen generator.", false);
+    return;
+  }
+
+  setStatus("AI agent is building a screen configuration...", true);
+
+  try {
+    const res = await fetch("/api/generate-screen", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ prompt }),
+    });
+
+    if (!res.ok) {
+      const err = await res.json();
+      throw new Error(err.detail || "AI generation error");
+    }    
+    const data = await res.json();
+    console.log(data);
+    applyGeneratedScreenConfig(data.form_data);
+    document.getElementById("rawResult").textContent = JSON.stringify(data.input_data, null, 2);
+    setStatus("AI configuration loaded into the form. You can edit it and run simulation.", true);
+  } catch (e) {
+    setStatus(`Error: ${e.message}`, false);
+  }
 }
 
 async function runSimulation() {
@@ -410,6 +470,8 @@ async function runSimulation() {
   const payload = {
     particle: particles[0].name,
     energy_mev: particles[0].energy_mev,
+    screen_name: document.getElementById("screen_name").value.trim(),
+    screen_description: document.getElementById("screen_description").value.trim(),
     particles,
     use_mixed_beam: document.getElementById("beamMode").value === "mixed",
     events: Number(document.getElementById("events").value),
@@ -456,6 +518,7 @@ function initUi() {
   const removeLayerBtn = document.getElementById("removeLayerBtn");
   const addParticleBtn = document.getElementById("addParticleBtn");
   const removeParticleBtn = document.getElementById("removeParticleBtn");
+  const generateScreenBtn = document.getElementById("generateScreenBtn");
   const runBtn = document.getElementById("runBtn");
   const layersContainer = document.getElementById("layersContainer");
 
@@ -463,6 +526,7 @@ function initUi() {
   if (removeLayerBtn) removeLayerBtn.addEventListener("click", removeLayer);
   if (addParticleBtn) addParticleBtn.addEventListener("click", () => addParticleRow());
   if (removeParticleBtn) removeParticleBtn.addEventListener("click", removeParticleRow);
+  if (generateScreenBtn) generateScreenBtn.addEventListener("click", generateScreenWithAi);
   if (runBtn) runBtn.addEventListener("click", runSimulation);
 
   if (layersContainer) {

@@ -85,6 +85,8 @@ class BeamParticleInput(BaseModel):
 class RunRequest(BaseModel):
     particle: str = Field("He3")
     energy_mev: float = Field(40.0, gt=0)
+    screen_name: str = Field("Web Configured Screen")
+    screen_description: str = Field("")
     particles: List[BeamParticleInput] = Field(default_factory=list)
     use_mixed_beam: bool = False
     events: int = Field(100, ge=1, le=1_000_000)
@@ -101,6 +103,10 @@ class RunRequest(BaseModel):
     build_energy_plots: bool = True
     build_3d_scene: bool = True
     layers: List[LayerInput] = Field(default_factory=list, min_length=1)
+
+
+class GenerateScreenRequest(BaseModel):
+    prompt: str = Field(..., min_length=10)
 
 
 app = FastAPI(title="Shield Config Web UI", version="1.2.0")
@@ -154,10 +160,53 @@ def _build_input_data(payload: RunRequest) -> Dict[str, Any]:
     total_um = sum(layer.width_um for layer in payload.layers)
     return {
         "Screen": {
-            "Name": "Web Configured Screen",
-            "Description": f"Layers: {len(materials)}, total thickness: {total_um:.2f} um",
+            "Name": payload.screen_name.strip() or "Web Configured Screen",
+            "Description": (
+                payload.screen_description.strip()
+                or f"Layers: {len(materials)}, total thickness: {total_um:.2f} um"
+            ),
             "Materials": materials,
         }
+    }
+
+
+def _material_to_layer(material: Dict[str, Any]) -> Dict[str, Any]:
+    elements = material.get("Elements") or []
+    is_compound = bool(material.get("isCompound"))
+    material_type = "compound" if is_compound else ("metal" if len(elements) <= 1 else "alloy")
+    layer_elements: List[Dict[str, Any]] = []
+
+    for element in elements:
+        base = {
+            "name": element.get("Name", ""),
+            "symbol": element.get("Symbol", ""),
+            "atomic_number": int(element.get("Atomic_number", 0) or 0),
+            "standard_atomic_weight": float(element.get("Standard_atomic_weight", 0.0) or 0.0),
+        }
+        if is_compound:
+            base["n_atoms"] = int(element.get("NAtoms", 0) or 0)
+        else:
+            base["density_g_cm3"] = float(element.get("Density", 0.0) or 0.0)
+            base["percentage"] = float(element.get("Percentage", 0.0) or 0.0)
+        layer_elements.append(base)
+
+    return {
+        "name": material.get("Name", "Layer"),
+        "description": material.get("Description", ""),
+        "width_um": float(material.get("Width", 0.0) or 0.0),
+        "material_type": material_type,
+        "density_g_cm3": float(material.get("Density", 0.0) or 0.0) if is_compound else None,
+        "elements": layer_elements,
+    }
+
+
+def _input_data_to_form_data(input_data: Dict[str, Any]) -> Dict[str, Any]:
+    screen = input_data.get("Screen") or {}
+    materials = screen.get("Materials") or []
+    return {
+        "screen_name": screen.get("Name", "Web Configured Screen"),
+        "screen_description": screen.get("Description", ""),
+        "layers": [_material_to_layer(material) for material in materials],
     }
 
 
@@ -267,6 +316,21 @@ def run_simulation(payload: RunRequest) -> Dict[str, Any]:
         "result": result_dict,
         "input_data": payload_result.get("input_data") or input_data,
         "generated_files": generated_files,
+    }
+
+
+@app.post("/api/generate-screen")
+def generate_screen(payload: GenerateScreenRequest) -> Dict[str, Any]:
+    generated = _call_controller(
+        "POST",
+        "/screen-config/generate",
+        payload={"prompt": payload.prompt},
+    )
+    input_data = generated.get("input_data") or {}
+    return {
+        "status": "ok",
+        "input_data": input_data,
+        "form_data": _input_data_to_form_data(input_data),
     }
 
 

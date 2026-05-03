@@ -109,6 +109,10 @@ class SimulationRequest(BaseModel):
     build_3d_scene: bool = True
 
 
+class ScreenGenerationRequest(BaseModel):
+    prompt: str = Field(..., min_length=10, description="Prompt for LLM screen generation")
+
+
 class SimulationResponse(BaseModel):
     simulation_id: str
     status: str
@@ -258,16 +262,38 @@ def _build_generated_files(simulation_id: str, result_dir: str) -> List[Dict[str
 
 
 def _build_visualization_result(result_data: Dict[str, Any]) -> SimpleNamespace:
+    def _deserialize_tracks(tracks_payload: Optional[Dict[str, Any]]) -> Optional[Dict[Any, Any]]:
+        if not tracks_payload:
+            return None
+        restored: Dict[Any, Any] = {}
+        for key, points in tracks_payload.items():
+            if isinstance(key, str) and ":" in key:
+                left, right = key.split(":", 1)
+                try:
+                    restored[(int(left), int(right))] = points
+                    continue
+                except ValueError:
+                    pass
+            if isinstance(key, str) and "_" in key:
+                left, right = key.split("_", 1)
+                try:
+                    restored[(int(left), int(right))] = points
+                    continue
+                except ValueError:
+                    pass
+            restored[key] = points
+        return restored
+
     particle_results: Dict[str, Any] = {}
     for key, value in (result_data.get("particle_results") or {}).items():
         particle_results[key] = SimpleNamespace(
             particle=value.get("particle"),
-            tracks=value.get("tracks"),
+            tracks=_deserialize_tracks(value.get("tracks")),
         )
 
     return SimpleNamespace(
         particle_results=particle_results or None,
-        tracks=result_data.get("tracks"),
+        tracks=_deserialize_tracks(result_data.get("tracks")),
         screen_info=result_data.get("screen_info"),
         energy_profiles=result_data.get("energy_profiles"),
         exit_energies=result_data.get("exit_energies"),
@@ -287,6 +313,8 @@ def run_simulation_process(simulation_id: str, config_dict: dict, result_dir: st
     result_file = os.path.join(result_dir, "result.json")
     try:
         runner_config = _to_simulation_config_dict(config_dict)
+        if bool(config_dict.get("build_3d_scene", True)):
+            runner_config["collect_tracks"] = True
         with open(config_file, "w", encoding="utf-8") as f:
             json.dump(runner_config, f)
 
@@ -459,6 +487,21 @@ async def simulate(request: SimulationRequest, background_tasks: BackgroundTasks
         message=f"Simulation {simulation_id} started successfully",
         created_at=simulation_statuses[simulation_id]["created_at"],
     )
+
+
+@app.post("/screen-config/generate")
+async def generate_screen_config(request: ScreenGenerationRequest):
+    try:
+        from main import generate_screen_config_with_giga
+
+        input_data = generate_screen_config_with_giga(request.prompt)
+        return {
+            "status": "ok",
+            "input_data": input_data,
+        }
+    except Exception as exc:
+        logger.exception("Failed to generate screen config with LLM")
+        raise HTTPException(status_code=500, detail=f"Failed to generate screen config: {exc}")
 
 
 @app.get("/simulations/{simulation_id}", response_model=SimulationStatus)

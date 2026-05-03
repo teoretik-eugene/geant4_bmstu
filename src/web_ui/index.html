@@ -123,6 +123,10 @@
     <div class="card">
       <h1>Shield Configurator</h1>
       <p>Configure beam, layers and material composition for metals, alloys or compounds, then run Geant4 simulation.</p>
+      <div class="grid" style="margin-bottom: 10px;">
+        <div><label>Screen name</label><input id="screen_name" type="text" value="Web Configured Screen"></div>
+        <div style="grid-column: span 3;"><label>Screen description</label><input id="screen_description" type="text" value="Editable screen configuration"></div>
+      </div>
       <div class="grid">
         <div><label>Beam Mode</label><select id="beamMode"><option value="sequential" selected>Sequential runs</option><option value="mixed">Mixed beam</option></select></div>
         <div><label>Events</label><input id="events" type="number" value="100" min="1"></div>
@@ -148,6 +152,18 @@
         </thead>
         <tbody></tbody>
       </table>
+    </div>
+
+    <div class="card">
+      <h3>AI Screen Builder</h3>
+      <p class="muted">
+        Describe the required protection screen in natural language. The AI agent will build a ready screen configuration and load it into the form below.
+      </p>
+      <label>Prompt</label>
+      <textarea id="screenPrompt" rows="5" placeholder="Например: Сформируй трехслойный экран для протонов: внешний слой Al, затем Kapton как соединение, затем W для снижения остаточной энергии."></textarea>
+      <div class="btns" style="margin-top: 12px;">
+        <button type="button" class="add" id="generateScreenBtn">Generate Screen With AI</button>
+      </div>
     </div>
 
     <div class="card">
