@@ -1095,7 +1095,10 @@ class SingleProcessSimulationRunner:
         geom = ScreenGeometry(data=data, screen_info=screen_info, cfg=cfg, tracks=tracks)
         geom._precomputed_layout = layout
         run_manager.SetUserInitialization(geom)
-        physics_list = g4.FTFP_BERT()
+        # physics_list = g4.FTFP_BERT()
+        physics_list = g4.FTFP_BERT_HP()
+        # physics_list = g4.FTFP_BERT_TRV()
+        # physics_list = g4.FTFP_BERT_ATL
         # physics_list = g4.QBBC()
         # physics_list.SetDefaultMaxStepLength(0.001 * g4.mm)
         run_manager.SetUserInitialization(physics_list)
@@ -2345,10 +2348,65 @@ if __name__ == "__main__":
             "Name": "Экран из W и Ti",
             "Description": "Экран состоит из двух слоев: W и Ti.",
             "Materials": [
+                {
+                    "Name": "POLYETHYLENE",
+                    "Width": 5000.0,
+                    "Density": 0.965,
+                    "isCompound": True,
+                    "Elements": [
+                        {"Symbol": "C", "NAtoms": 2},
+                        {"Symbol": "H", "NAtoms": 4}
+                    ]
+                },
+                {
+                    "Name": "Al",
+                    "Description": "Алюминий (Al) толщиной 1000 мкм",
+                    "Width": 2000.0,
+                    "Elements": [
+                        {
+                            "Name": "Алюминий",
+                            "Symbol": "Al",
+                            "Atomic_number": 13,
+                            "Standard_atomic_weight": 26.98,
+                            "Density": 2.7,
+                            "Percentage": 100.0
+                        }
+                    ]
+                },
+                {
+                    "Name": "Титан",
+                    "Description": "Титан",
+                    "Width": 2000.0,
+                    "Elements": [
+                        {
+                            "Name": "Титан",
+                            "Symbol": "Ti",
+                            "Atomic_number": 22,
+                            "Standard_atomic_weight": 47.87,
+                            "Density": 4.5,
+                            "Percentage": 100.0
+                        }
+                    ]
+                },
+                {
+                    "Name": "Pb",
+                    "Description": "Pb layer",
+                    "Width": 30000.0,
+                    "Elements": [
+                        {
+                            "Name": "Свинец",
+                            "Symbol": "Pb",
+                            "Atomic_number": 82,
+                            "Standard_atomic_weight": 207.2,
+                            "Density": 11.35,
+                            "Percentage": 100.0
+                        }
+                    ]
+                }
                 # {
                 #     "Name": "W",
                 #     "Description": "Вольфрам (W) толщиной 2000 мкм",
-                #     "Width": 500.0,
+                #     "Width": 2500.0,
                 #     "Elements": [
                 #         {
                 #             "Name": "Вольфрам",
@@ -2359,11 +2417,11 @@ if __name__ == "__main__":
                 #             "Percentage": 100.0
                 #         }
                 #     ]
-                # },
+                # }
                 # {
                 #     "Name": "Al",
                 #     "Description": "Алюминий (Al) толщиной 1000 мкм",
-                #     "Width": 1000.0,
+                #     "Width": 4000.0,
                 #     "Elements": [
                 #         {
                 #             "Name": "Алюминий",
@@ -2371,21 +2429,6 @@ if __name__ == "__main__":
                 #             "Atomic_number": 13,
                 #             "Standard_atomic_weight": 26.98,
                 #             "Density": 2.7,
-                #             "Percentage": 100.0
-                #         }
-                #     ]
-                # },
-                # {
-                #     "Name": "Pb",
-                #     "Description": "Pb layer",
-                #     "Width": 2000.0,
-                #     "Elements": [
-                #         {
-                #             "Name": "Свинец",
-                #             "Symbol": "Pb",
-                #             "Atomic_number": 82,
-                #             "Standard_atomic_weight": 207.2,
-                #             "Density": 11.35,
                 #             "Percentage": 100.0
                 #         }
                 #     ]
@@ -2405,18 +2448,6 @@ if __name__ == "__main__":
                 #         }
                 #     ]
                 # },
-                {
-                    "Name": "Kapton",
-                    "Width": 1000.0,
-                    "Density": 1.42,
-                    "isCompound": True,
-                    "Elements": [
-                        {"Symbol": "C", "NAtoms": 22},
-                        {"Symbol": "H", "NAtoms": 10},
-                        {"Symbol": "N", "NAtoms": 2},
-                        {"Symbol": "O", "NAtoms": 5}
-                    ]
-                }
             ]
         }
     }
@@ -2424,17 +2455,19 @@ if __name__ == "__main__":
     Использовать для получения данных по task_id с сайта (раскоментировать строку)
     '''
     # data = ds.get_current_task_to_json(task_id)
-    events = 1_000
+    # events = 1_000_000
+    events = 50_000
     # Пример: Мульти-частичный последовательный режим
     cfg_multi = SimulationConfig(
+        screen_xy_mm=10,
         task_id=task_id,
         input_data=data,
         particles=[
-            # ParticleConfig(name="He3", energy_mev=30.0),
-            ParticleConfig(name="e-", energy_mev=10.0),
-            ParticleConfig(name="gamma", energy_mev=20.0)
+            ParticleConfig(name="He3", energy_mev=30.0),
+            # ParticleConfig(name="e-", energy_mev=10.0),
+            # ParticleConfig(name="gamma", energy_mev=20.0)
             # ParticleConfig(name="alpha", energy_mev=70.0),
-            # ParticleConfig(name="proton", energy_mev=30.0)
+            ParticleConfig(name="proton", energy_mev=30.0)
             # ParticleConfig(name="neutron", energy_mev=50.0)
         ],
         events=events,
