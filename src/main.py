@@ -477,14 +477,14 @@ class ScreenGeometry(g4.G4VUserDetectorConstruction):
                 electronics_material,
                 "Electronics"
             )
-            user_limits = g4.G4UserLimits(
-                0.001 * g4.mm,
-                1.0 * g4.s,
-                1.0 * g4.s,
-                0.001 * g4.mm,
-                0.001 * g4.MeV
-            )
-            self.electronics_logical.SetUserLimits(user_limits)
+            # user_limits = g4.G4UserLimits(
+            #     0.001 * g4.mm,
+            #     1.0 * g4.s,
+            #     1.0 * g4.s,
+            #     0.001 * g4.mm,
+            #     0.001 * g4.MeV
+            # )
+            # self.electronics_logical.SetUserLimits(user_limits)
             g4.G4PVPlacement(
                 None,
                 g4.G4ThreeVector(0, electronics_center_y, electronics_center_z),
@@ -1095,12 +1095,8 @@ class SingleProcessSimulationRunner:
         geom = ScreenGeometry(data=data, screen_info=screen_info, cfg=cfg, tracks=tracks)
         geom._precomputed_layout = layout
         run_manager.SetUserInitialization(geom)
-        # physics_list = g4.FTFP_BERT()
-        physics_list = g4.FTFP_BERT_HP()
-        # physics_list = g4.FTFP_BERT_TRV()
-        # physics_list = g4.FTFP_BERT_ATL
-        # physics_list = g4.QBBC()
-        # physics_list.SetDefaultMaxStepLength(0.001 * g4.mm)
+        physics_list = g4.FTFP_BERT()
+        # physics_list = g4.FTFP_BERT_HP()
         run_manager.SetUserInitialization(physics_list)
         # run_manager.SetUserInitialization(g4.QGSP_BERT())
         # Определяем тип генератора
@@ -2348,7 +2344,7 @@ if __name__ == "__main__":
             "Name": "Экран из W и Ti",
             "Description": "Экран состоит из двух слоев: W и Ti.",
             "Materials": [
-                {
+                                {
                     "Name": "POLYETHYLENE",
                     "Width": 5000.0,
                     "Density": 0.965,
@@ -2361,7 +2357,7 @@ if __name__ == "__main__":
                 {
                     "Name": "Al",
                     "Description": "Алюминий (Al) толщиной 1000 мкм",
-                    "Width": 2000.0,
+                    "Width": 3000.0,
                     "Elements": [
                         {
                             "Name": "Алюминий",
@@ -2373,25 +2369,26 @@ if __name__ == "__main__":
                         }
                     ]
                 },
-                {
-                    "Name": "Титан",
-                    "Description": "Титан",
-                    "Width": 2000.0,
-                    "Elements": [
-                        {
-                            "Name": "Титан",
-                            "Symbol": "Ti",
-                            "Atomic_number": 22,
-                            "Standard_atomic_weight": 47.87,
-                            "Density": 4.5,
-                            "Percentage": 100.0
-                        }
-                    ]
-                },
+
+                # {
+                #     "Name": "Титан",
+                #     "Description": "Титан",
+                #     "Width": 2000.0,
+                #     "Elements": [
+                #         {
+                #             "Name": "Титан",
+                #             "Symbol": "Ti",
+                #             "Atomic_number": 22,
+                #             "Standard_atomic_weight": 47.87,
+                #             "Density": 4.5,
+                #             "Percentage": 100.0
+                #         }
+                #     ]
+                # },
                 {
                     "Name": "Pb",
                     "Description": "Pb layer",
-                    "Width": 30000.0,
+                    "Width": 4000.0,
                     "Elements": [
                         {
                             "Name": "Свинец",
@@ -2402,11 +2399,41 @@ if __name__ == "__main__":
                             "Percentage": 100.0
                         }
                     ]
+                },
+                {
+                    "Name": "Al",
+                    "Description": "Алюминий (Al) толщиной 1000 мкм",
+                    "Width": 1000.0,
+                    "Elements": [
+                        {
+                            "Name": "Алюминий",
+                            "Symbol": "Al",
+                            "Atomic_number": 13,
+                            "Standard_atomic_weight": 26.98,
+                            "Density": 2.7,
+                            "Percentage": 100.0
+                        }
+                    ]
                 }
+                # {
+                #     "Name": "Al",
+                #     "Description": "Алюминий (Al) толщиной 1000 мкм",
+                #     "Width": 2000.0,
+                #     "Elements": [
+                #         {
+                #             "Name": "Алюминий",
+                #             "Symbol": "Al",
+                #             "Atomic_number": 13,
+                #             "Standard_atomic_weight": 26.98,
+                #             "Density": 2.7,
+                #             "Percentage": 100.0
+                #         }
+                #     ]
+                # }
                 # {
                 #     "Name": "W",
                 #     "Description": "Вольфрам (W) толщиной 2000 мкм",
-                #     "Width": 2500.0,
+                #     "Width": 1000.0,
                 #     "Elements": [
                 #         {
                 #             "Name": "Вольфрам",
@@ -2456,10 +2483,11 @@ if __name__ == "__main__":
     '''
     # data = ds.get_current_task_to_json(task_id)
     # events = 1_000_000
-    events = 50_000
+    events = 100_000
     # Пример: Мульти-частичный последовательный режим
     cfg_multi = SimulationConfig(
-        screen_xy_mm=10,
+        screen_xy_mm=100,
+        electronics_thickness_mm=0.5,
         task_id=task_id,
         input_data=data,
         particles=[
