@@ -291,23 +291,49 @@ class TrackCollector:
         if particle_type and (event_id, track_id) not in self._particle_types:
             self._particle_types[(event_id, track_id)] = particle_type
 
+    # Максимальное число профилей вторичных треков.
+    # При 100k событий He3/proton без ограничения накапливаются миллионы
+    # профилей → утечка памяти и искажённая статистика вторичных.
+    _MAX_SECONDARY_PROFILES: int = 50_000
+
     def add_energy(self, event_id, track_id, parent_id, particle_type, z, energy):
+        # пропускаем запись если collect_tracks отключён
+        if not self.enabled:
+            return
+
         key = (event_id, track_id)
 
         if key not in self._energy_profiles:
+            # для вторичных треков применяем ограничение на число профилей
+            if parent_id != 0:
+                n_secondary = sum(
+                    1 for p in self._energy_profiles.values() if p["parent_id"] != 0
+                )
+                if n_secondary >= self._MAX_SECONDARY_PROFILES:
+                    return
             self._energy_profiles[key] = {
                 "parent_id": parent_id,
-                "particle": particle_type,
-                "points": []
+                "particle":  particle_type,
+                "points":    []
             }
 
         self._energy_profiles[key]["points"].append((z, energy))
 
-    def add_exit_energy(self, energy: float, is_primary: bool = True, particle_type: str = "unknown") -> None:
+    def add_exit_energy(
+        self,
+        energy: float,
+        is_primary: bool = True,
+        particle_type: str = "unknown",
+        event_id: Optional[int] = None,
+    ) -> None:
+        """Регистрирует частицу, пересёкшую заднюю границу экрана.
+        event_id используется для подсчёта SPR по уникальным событиям.
+        """
         self._exit_energies.append({
-            "energy_mev": float(energy),
-            "is_primary": is_primary,
-            "particle_type": particle_type
+            "energy_mev":    float(energy),
+            "is_primary":    is_primary,
+            "particle_type": particle_type,
+            "event_id":      event_id,
         })
 
     def add_electronics_step(
@@ -845,15 +871,32 @@ class ScreenSteppingAction(g4.G4UserSteppingAction):
             self.tracks.add(self.event_action.event_id, track.GetTrackID(), pos, particle_name)
 
         if pre_z_pos <= self.screens_end_z_mm < z_pos:
-            key = (self.event_action.event_id or -1, track.GetTrackID())
+            # <-- FIX 1: фильтр мёртвых треков.
+            # Geant4 может вызвать UserSteppingAction для шага, в котором
+            # частица была поглощена (фотоэффект, аннигиляция и т.д.).
+            # Такой трек пересекает границу экрана геометрически, но физически
+            # он уже не существует — его не нужно считать как «вышедший».
+            if track.GetTrackStatus() != g4.fAlive:
+                return
+
             exit_energy_mev = track.GetKineticEnergy() / g4.MeV
+
+            # <-- FIX 2: порог минимальной энергии.
+            # Исключаем тепловые/субпороговые частицы (< 1 кэВ), которые
+            # Geant4 иногда передаёт как живые, но с нулевой кинетической энергией.
+            if exit_energy_mev < 1e-3:
+                return
+
+            current_event_id = self.event_action.event_id
+            key = (current_event_id or -1, track.GetTrackID())
 
             if track.GetTrackID() == 1:
                 if key not in self.primary_out:
                     self.tracks.add_exit_energy(
                         exit_energy_mev,
                         is_primary=True,
-                        particle_type=particle_name
+                        particle_type=particle_name,
+                        event_id=current_event_id,   # <-- FIX 3: передаём event_id
                     )
                     self.primary_out.append(key)
             else:
@@ -861,7 +904,8 @@ class ScreenSteppingAction(g4.G4UserSteppingAction):
                     self.tracks.add_exit_energy(
                         exit_energy_mev,
                         is_primary=False,
-                        particle_type=particle_name
+                        particle_type=particle_name,
+                        event_id=current_event_id,   # <-- FIX 3: передаём event_id
                     )
                     self.secondary_out.append(key)
 
@@ -1804,13 +1848,34 @@ def _compute_energy_summary(
 
     # ------------------------------------------------------------------ #
     # Критерий C6: Secondary Production Ratio (SPR)                      #
-    # SPR = n_secondary_exited / events                                  #
-    # Показывает долю событий, породивших хотя бы одну вторичную         #
-    # частицу ЗА экраном. Высокий SPR означает, что экран сам является   #
-    # источником вторичного излучения (тормозное, нейтроны, гаммы и т.д) #
-    # даже при хорошем задержании первичных частиц.                      #
+    # SPR = N_событий_с_вторичными_за_экраном / N_events                 #
+    #                                                                     #
+    # ВАЖНО: считаем уникальные СОБЫТИЯ (по event_id), а не треки.       #
+    # Одно событие может породить десятки вторичных треков за экраном,   #
+    # поэтому подсчёт треков даёт SPR >> 1.0 и всегда проваливает C6.   #
+    # Правильный физический смысл: «в скольких процентах событий         #
+    # хотя бы одна вторичная частица вышла за экран?»                    #
     # ------------------------------------------------------------------ #
-    secondary_production_ratio = n_secondary_exited / events if events > 0 else 0.0
+    secondary_events_set: set = set()
+    for item in (exit_energies or []):
+        if not isinstance(item, dict):
+            continue
+        if item.get("is_primary", True):
+            continue
+        eid = item.get("event_id")
+        if eid is not None:
+            secondary_events_set.add(eid)
+    n_secondary_events = len(secondary_events_set)
+
+    # secondary_production_ratio — доля событий с вторичными за экраном
+    # n_secondary_exited         — суммарное число вторичных треков (для статистики)
+    secondary_production_ratio = n_secondary_events / events if events > 0 else 0.0
+
+    logging.info(
+        "SPR: %d unique events with secondary exit out of %d total events "
+        "(%.2f%%), total secondary tracks behind screen: %d",
+        n_secondary_events, events, secondary_production_ratio * 100.0, n_secondary_exited,
+    )
 
     c1_fluence_ok = fluence_attenuation_factor <= FAF_THRESHOLD
     c2_bragg_ok   = bragg_inside_fraction >= BRAGG_INSIDE_THRESHOLD
@@ -1838,7 +1903,7 @@ def _compute_energy_summary(
                            f"{bragg_inside_fraction * 100:.1f}% "
                            f"(порог >= {BRAGG_INSIDE_THRESHOLD * 100:.0f}%)"
         },
-                "C3_dose": {
+            "C3_dose": {
             "passed": c3_dose_ok,
             "value": electronics_let.get("absorbed_dose_gy"),
             "threshold": dose_threshold_gy,
@@ -1858,7 +1923,7 @@ def _compute_energy_summary(
                 else electronics_let.get("reason", "Нет данных о LET")
             )
         },
-                "C5_event_upset": {
+            "C5_event_upset": {
             "passed": c5_upset_ok,
             "value": event_upset_risk.get("upset_events_count", 0),
             "threshold": 0,
@@ -1868,7 +1933,7 @@ def _compute_energy_summary(
                 else f"Событий с опасным LET: {event_upset_risk.get('upset_events_count', 0)}"
             )
         },
-        "C6_secondary_fluence": {
+            "C6_secondary_fluence": {
             "passed": c6_secondary_ok,
             "value": secondary_production_ratio,
             "threshold": secondary_fluence_threshold,
@@ -1876,7 +1941,8 @@ def _compute_energy_summary(
                 f"Доля событий с вторичными частицами за экраном: "
                 f"{secondary_production_ratio * 100:.2f}% "
                 f"(порог <= {secondary_fluence_threshold * 100:.0f}%, "
-                f"абс.: {n_secondary_exited} из {events} событий)"
+                f"уник. событий с вторичными: {n_secondary_events} из {events}, "
+                f"всего вторичных треков: {n_secondary_exited})"
             )
         },
     }
@@ -1980,15 +2046,18 @@ def _compute_energy_summary(
             "fluence_attenuation_percent":     fluence_attenuation_factor * 100.0,
             "fluence_attenuation_coeff":       fluence_attenuation_coeff,
             "stopping_efficiency_percent":     fluence_attenuation_coeff * 100.0,
-            "secondary_production_ratio":      secondary_production_ratio,
+                        "secondary_production_ratio":      secondary_production_ratio,
             "secondary_production_percent":    secondary_production_ratio * 100.0,
+            "secondary_events_with_exit":       n_secondary_events,
+            "secondary_tracks_exited":          n_secondary_exited,
             "secondary_fluence_threshold":     secondary_fluence_threshold,
             "secondary_fluence_threshold_pct": secondary_fluence_threshold * 100.0,
             "comment": (
                 f"Экран задержал {fluence_attenuation_coeff * 100:.1f}% первичных частиц "
                 f"({events - n_primary_exited} из {events}). "
-                f"Вторичных за экраном: {n_secondary_exited} "
-                f"({secondary_production_ratio * 100:.2f}% от событий)."
+                f"Событий с вторичными за экраном: {n_secondary_events} "
+                f"({secondary_production_ratio * 100:.2f}% от событий), "
+                f"всего вторичных треков за экраном: {n_secondary_exited}."
             ),
         },
         # --- остаточная энергия ---
@@ -2344,7 +2413,7 @@ if __name__ == "__main__":
             "Name": "Экран из W и Ti",
             "Description": "Экран состоит из двух слоев: W и Ti.",
             "Materials": [
-                                {
+                {
                     "Name": "POLYETHYLENE",
                     "Width": 5000.0,
                     "Density": 0.965,
@@ -2398,6 +2467,16 @@ if __name__ == "__main__":
                             "Density": 11.35,
                             "Percentage": 100.0
                         }
+                    ]
+                },
+                {
+                    "Name": "Paraffin",
+                    "Width": 50000.0,
+                    "Density": 0.794,
+                    "isCompound": True,
+                    "Elements": [
+                        {"Symbol": "C", "NAtoms": 22},
+                        {"Symbol": "H", "NAtoms": 46}
                     ]
                 },
                 {
@@ -2486,7 +2565,7 @@ if __name__ == "__main__":
     events = 100_000
     # Пример: Мульти-частичный последовательный режим
     cfg_multi = SimulationConfig(
-        screen_xy_mm=100,
+        screen_xy_mm=1000,
         electronics_thickness_mm=0.5,
         task_id=task_id,
         input_data=data,
