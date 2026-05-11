@@ -556,7 +556,11 @@ class ScreenGeometry(g4.G4VUserDetectorConstruction):
                 self.tracks
             )
             electronics_mfd = g4.G4MultiFunctionalDetector("ElectronicsMFD")
-            electronics_mfd.RegisterPrimitive(g4.G4PSDoseDeposit("DoseDeposit", "Gy"))
+            # ИСПРАВЛЕНИЕ B: G4PSDoseDeposit принимает только имя (и опционально depth:int).
+            # Передача строки "Gy" как второго аргумента некорректна — scorer
+            # либо падает, либо интерпретирует "Gy" как depth=0 (строка → int → 0).
+            # Единицы Гр задаются делением на g4.gray при чтении значения.
+            electronics_mfd.RegisterPrimitive(g4.G4PSDoseDeposit("DoseDeposit"))
 
             electronics_multi_sd = g4.G4MultiSensitiveDetector("ElectronicsMultiSD")
             electronics_multi_sd.AddSD(electronics_sd)
@@ -741,7 +745,17 @@ class ElectronicsSensitiveDetector(g4.G4VSensitiveDetector):
         else:
             let_step_mev_cm2_mg = None
 
-        if edep_mev <= 0 and step_length_mm <= 0:
+        # ИСПРАВЛЕНИЕ C: ранее условие "edep_mev <= 0 AND step_length_mm <= 0"
+        # пропускало шаги с edep_mev > 0 и step_length_mm == 0.
+        # Такие "виртуальные" шаги возникают при:
+        #   - фотоэффекте гаммы (вся энергия передаётся фотоэлектрону локально),
+        #   - ядерных взаимодействиях нейтронов (ядро отдачи рождается на месте),
+        #   - аннигиляции позитрона в покое.
+        # Эти шаги несут реальный вклад в поглощённую дозу и должны регистрироваться.
+        # Правильный фильтр: пропускаем только шаги без отложенной энергии.
+        # Шаги с edep_mev > 0 и step_length_mm == 0 (виртуальные) — регистрируем.
+        # Шаги с edep_mev <= 0 (транспортные без взаимодействия) — пропускаем.
+        if edep_mev <= 0:
             return True
 
         self.tracks.add_electronics_step(
@@ -803,11 +817,32 @@ class ScreenEventAction(g4.G4UserEventAction):
                         hc = hce.GetHC(self._dose_collection_id)
                         dose_event_gy = 0.0
                         if hc is not None:
-                            for _, value in hc:
-                                # Исправление #2: G4PSDoseDeposit возвращает значение
-                                # во внутренних единицах Geant4 (MeV/kg * system factor).
-                                # Необходимо явно делить на g4.gray для перевода в Гр.
-                                dose_event_gy += float(value) / g4.gray
+                            # ИСПРАВЛЕНИЕ A: G4THitsMap в geant4_pybind не поддерживает
+                            # распаковку "for _, value in hc" — это вызывает TypeError
+                            # или итерирует по ключам без значений.
+                            # Правильный способ: GetMap() возвращает dict {copy_no: value*}.
+                            # G4PSDoseDeposit хранит значение в ВНУТРЕННИХ единицах Geant4
+                            # (MeV / kg в системе Geant4, где 1 Гр = 1 Дж/кг = 6.2415e9 МэВ/кг).
+                            # g4.gray — это коэффициент перевода: 1 Гр во внутренних единицах.
+                            try:
+                                hits_map = hc.GetMap()
+                                for copy_no, val_ptr in hits_map.items():
+                                    # val_ptr — указатель на G4double (разыменовывается как float)
+                                    raw_value = float(val_ptr)
+                                    dose_event_gy += raw_value / g4.gray
+                            except AttributeError:
+                                # Fallback: некоторые версии geant4_pybind возвращают
+                                # итерируемый объект с прямым доступом по индексу
+                                try:
+                                    n = hc.entries()
+                                    for i in range(n):
+                                        raw_value = float(hc[i])
+                                        dose_event_gy += raw_value / g4.gray
+                                except Exception as inner_exc:
+                                    logging.warning(
+                                        "Cannot iterate dose HitsMap (entries fallback failed): %s",
+                                        inner_exc
+                                    )
                         self.tracks.add_electronics_dose_event(dose_event_gy)
             except Exception as exc:
                 logging.warning("Failed to read dose scorer collection '%s': %s", self.dose_collection_name, exc)
@@ -2148,6 +2183,10 @@ class SimulationRunner:
             )
             configs.append((p_config, asdict(particle_cfg)))
         
+        # Счётчик завершённых подпрогонов — используется для смещения event_id
+        # при объединении хитов из разных подпрогонов (ИСПРАВЛЕНИЕ D).
+        _completed_run_index = 0
+
         # Запускаем в параллельных процессах
         with ProcessPoolExecutor(max_workers=min(len(configs), mp.cpu_count())) as executor:
             future_to_config = {
@@ -2185,27 +2224,52 @@ class SimulationRunner:
                     )
                     particle_results[key] = result
                     # Накапливаем реально выполненные события этого подпрогона
-                    all_total_events += int(result_dict.get("total_particles") or 0)
+                    run_events = int(result_dict.get("total_particles") or 0)
+                    all_total_events += run_events
                     # logging.info(f"cfg result: {particle_results[key]}")
                     print(f"Completed: {key}")
-                    logging.info(f"Completed: {key}")                                    
+                    logging.info(f"Completed: {key}")
 
                     if "energy_profiles" in result_dict and result_dict["energy_profiles"]:
                         for track_key, profiles in result_dict["energy_profiles"].items():
                             # Добавляем префикс с типом частицы для уникальности
                             new_key = f"{p_config.name}_{track_key}"
                             all_energy_profiles[new_key] = profiles
-                    else :
+                    else:
                         logging.info("no energy profiles")
 
-                    # logging.info(f"all energy profiles: {all_energy_profiles}")
+                    # ИСПРАВЛЕНИЕ D: event_id в каждом подпрогоне нумеруется с 0.
+                    # При объединении результатов нескольких подпрогонов (разные частицы)
+                    # одинаковые event_id из разных прогонов сливаются в один set,
+                    # что занижает n_secondary_events (SPR) и n_hit_events (доза/событие).
+                    # Решение: смещаем event_id на _completed_run_index * cfg.events,
+                    # гарантируя уникальность event_id в объединённом наборе.
+                    # _completed_run_index — монотонный счётчик завершённых подпрогонов,
+                    # не зависящий от порядка завершения future (as_completed).
+                    event_id_offset = _completed_run_index * cfg.events
 
                     if "exit_energies" in result_dict and result_dict["exit_energies"]:
                         logging.info(f'ex: {result_dict["exit_energies"]}')
-                        all_exit_energies.extend(result_dict["exit_energies"])
+                        exit_energies_with_offset = []
+                        for item in result_dict["exit_energies"]:
+                            if isinstance(item, dict) and item.get("event_id") is not None:
+                                item_copy = dict(item)
+                                item_copy["event_id"] = int(item_copy["event_id"]) + event_id_offset
+                                exit_energies_with_offset.append(item_copy)
+                            else:
+                                exit_energies_with_offset.append(item)
+                        all_exit_energies.extend(exit_energies_with_offset)
 
                     if "electronics_hits" in result_dict and result_dict["electronics_hits"]:
-                        all_electronics_hits.extend(result_dict["electronics_hits"])
+                        hits_with_offset = []
+                        for hit in result_dict["electronics_hits"]:
+                            hit_copy = dict(hit)
+                            if hit_copy.get("event_id") is not None:
+                                hit_copy["event_id"] = int(hit_copy["event_id"]) + event_id_offset
+                            hits_with_offset.append(hit_copy)
+                        all_electronics_hits.extend(hits_with_offset)
+
+                    _completed_run_index += 1
 
                     if "energy_summary" in result_dict and result_dict["energy_summary"]:
                         logging.info(f'energy_summary: {result_dict["energy_summary"]}')
@@ -2293,6 +2357,9 @@ class SimulationRunner:
                         tracks=None
                     )
                     particle_results[key] = result
+                    # ИСПРАВЛЕНИЕ D (продолжение): счётчик инкрементируется даже при ошибке,
+                    # чтобы смещение event_id оставалось монотонным для последующих подпрогонов.
+                    _completed_run_index += 1
 
         # Создаем сравнительный отчет
         logging.info(f'partivle results :{particle_results}')
@@ -2469,16 +2536,16 @@ if __name__ == "__main__":
                         }
                     ]
                 },
-                {
-                    "Name": "Paraffin",
-                    "Width": 50000.0,
-                    "Density": 0.794,
-                    "isCompound": True,
-                    "Elements": [
-                        {"Symbol": "C", "NAtoms": 22},
-                        {"Symbol": "H", "NAtoms": 46}
-                    ]
-                },
+                # {
+                #     "Name": "Paraffin",
+                #     "Width": 50000.0,
+                #     "Density": 0.794,
+                #     "isCompound": True,
+                #     "Elements": [
+                #         {"Symbol": "C", "NAtoms": 22},
+                #         {"Symbol": "H", "NAtoms": 46}
+                #     ]
+                # },
                 {
                     "Name": "Al",
                     "Description": "Алюминий (Al) толщиной 1000 мкм",
