@@ -281,8 +281,9 @@ class TrackCollector:
         # }
         self._exit_energies = []    # энергии на выходе: список dict {energy_mev, is_primary, particle_type}
         self._electronics_hits: Dict[Tuple[int, int], Dict[str, Any]] = {}
-        self._electronics_dose_gy_total: float = 0.0
-        self._electronics_dose_events: int = 0
+        # Накопление edep (МэВ) по event_id для ручного подсчёта дозы.
+        # Ключ — event_id (int), значение — суммарный edep в МэВ за событие.
+        self._electronics_edep_by_event: Dict[int, float] = {}
     
     def add(self, event_id: int, track_id: int, pos: g4.G4ThreeVector, particle_type: str = None) -> None:
         if not self.enabled:
@@ -380,15 +381,21 @@ class TrackCollector:
             current_max = hit.get("max_let_mev_cm2_mg")
             hit["max_let_mev_cm2_mg"] = let_value if current_max is None else max(current_max, let_value)
 
-    def add_electronics_dose_event(self, dose_gy: float) -> None:
+    def add_electronics_edep_event(self, event_id: int, edep_mev: float) -> None:
+        """Накапливает edep (МэВ) для данного события.
+        Вызывается из ElectronicsSensitiveDetector.ProcessHits() для каждого шага с edep > 0.
+        Доза вычисляется позже как sum(edep_by_event.values()) * 1.602e-13 / mass_kg.
+        """
         try:
-            dose_value = float(dose_gy)
+            edep_value = float(edep_mev)
         except (TypeError, ValueError):
             return
-        if dose_value < 0:
+        if edep_value <= 0:
             return
-        self._electronics_dose_gy_total += dose_value
-        self._electronics_dose_events += 1
+        key = int(event_id) if event_id is not None else -1
+        self._electronics_edep_by_event[key] = (
+            self._electronics_edep_by_event.get(key, 0.0) + edep_value
+        )
 
     def get_particle_type(self, event_id: int, track_id: int) -> str:
         return self._particle_types.get((event_id, track_id), "unknown")
@@ -414,12 +421,9 @@ class TrackCollector:
         return list(self._electronics_hits.values())
 
     @property
-    def electronics_dose_gy_total(self):
-        return self._electronics_dose_gy_total
-
-    @property
-    def electronics_dose_events(self):
-        return self._electronics_dose_events
+    def electronics_edep_by_event(self) -> Dict[int, float]:
+        """Словарь {event_id: суммарный_edep_МэВ} для ручного подсчёта дозы."""
+        return self._electronics_edep_by_event
 
 # -----------------------------
 # Геометрия
@@ -434,7 +438,6 @@ class ScreenGeometry(g4.G4VUserDetectorConstruction):
         self.logic_world = None
         self.screen_logicals = []
         self.electronics_logical = None
-        self.electronics_dose_collection_name = "ElectronicsMFD/DoseDeposit"
         self.screens_end_z_mm = cfg.first_screen_z_mm
         self._precomputed_layout: Optional[dict] = None
 
@@ -550,26 +553,16 @@ class ScreenGeometry(g4.G4VUserDetectorConstruction):
             sdm.AddNewDetector(sd)
             sc_log.SetSensitiveDetector(sd)
         if self.electronics_logical is not None and self.tracks is not None:
+            # Используем только ElectronicsSensitiveDetector для ручного подсчёта дозы.
+            # G4MultiFunctionalDetector / G4PSDoseDeposit убраны — доза считается
+            # вручную через накопление edep в TrackCollector._electronics_edep_by_event.
             electronics_sd = ElectronicsSensitiveDetector(
                 "ElectronicsDetector",
                 self.screen_info,
                 self.tracks
             )
-            electronics_mfd = g4.G4MultiFunctionalDetector("ElectronicsMFD")
-            # ИСПРАВЛЕНИЕ B: G4PSDoseDeposit принимает только имя (и опционально depth:int).
-            # Передача строки "Gy" как второго аргумента некорректна — scorer
-            # либо падает, либо интерпретирует "Gy" как depth=0 (строка → int → 0).
-            # Единицы Гр задаются делением на g4.gray при чтении значения.
-            electronics_mfd.RegisterPrimitive(g4.G4PSDoseDeposit("DoseDeposit"))
-
-            electronics_multi_sd = g4.G4MultiSensitiveDetector("ElectronicsMultiSD")
-            electronics_multi_sd.AddSD(electronics_sd)
-            electronics_multi_sd.AddSD(electronics_mfd)
-
             sdm.AddNewDetector(electronics_sd)
-            sdm.AddNewDetector(electronics_mfd)
-            sdm.AddNewDetector(electronics_multi_sd)
-            self.electronics_logical.SetSensitiveDetector(electronics_multi_sd)
+            self.electronics_logical.SetSensitiveDetector(electronics_sd)
 
 # -----------------------------
 # Сенсоры
@@ -769,6 +762,9 @@ class ElectronicsSensitiveDetector(g4.G4VSensitiveDetector):
             post_energy_mev=post_energy_mev,
             let_mev_cm2_mg=let_step_mev_cm2_mg
         )
+        # Ручной подсчёт дозы: накапливаем edep по событиям.
+        # Доза = sum(edep_by_event.values()) * 1.602e-13 / mass_kg
+        self.tracks.add_electronics_edep_event(event_id=event_id, edep_mev=edep_mev)
 
         electronics_info: Dict = self.screen_info.setdefault("Electronics", {})
         electronics_info["deposited_energy_mev"] = (
@@ -786,66 +782,19 @@ class ElectronicsSensitiveDetector(g4.G4VSensitiveDetector):
         return True
 
 class ScreenEventAction(g4.G4UserEventAction):
-    def __init__(self, tracks: Optional[TrackCollector] = None, dose_collection_name: Optional[str] = None):
+    """Действие на уровне события.
+    Доза считается вручную через TrackCollector._electronics_edep_by_event —
+    G4PSDoseDeposit scorer не используется.
+    """
+    def __init__(self, tracks: Optional[TrackCollector] = None):
         super().__init__()
         self.event_id = None
         self.tracks = tracks
-        self.dose_collection_name = dose_collection_name
-        self._dose_collection_id = None
+
     def BeginOfEventAction(self, anEvent):
         self.event_id = anEvent.GetEventID()
-    def EndOfEventAction(self, anEvent):
-        if self.tracks is not None and self.dose_collection_name:
-            try:
-                if self._dose_collection_id is None or self._dose_collection_id < 0:
-                    new_id = g4.G4SDManager.GetSDMpointer().GetCollectionID(
-                        self.dose_collection_name
-                    )
-                    # Исправление #5: при нерабочем scorer предупреждаем явно,
-                    # чтобы не было молчаливого fallback на manual_edep_over_mass.
-                    if new_id < 0:
-                        logging.warning(
-                            "Dose scorer collection '%s' not found (id=%d). "
-                            "absorbed_dose_gy will be estimated from edep/mass fallback.",
-                            self.dose_collection_name, new_id
-                        )
-                    self._dose_collection_id = new_id
 
-                if self._dose_collection_id is not None and self._dose_collection_id >= 0:
-                    hce = anEvent.GetHCofThisEvent()
-                    if hce is not None:
-                        hc = hce.GetHC(self._dose_collection_id)
-                        dose_event_gy = 0.0
-                        if hc is not None:
-                            # ИСПРАВЛЕНИЕ A: G4THitsMap в geant4_pybind не поддерживает
-                            # распаковку "for _, value in hc" — это вызывает TypeError
-                            # или итерирует по ключам без значений.
-                            # Правильный способ: GetMap() возвращает dict {copy_no: value*}.
-                            # G4PSDoseDeposit хранит значение в ВНУТРЕННИХ единицах Geant4
-                            # (MeV / kg в системе Geant4, где 1 Гр = 1 Дж/кг = 6.2415e9 МэВ/кг).
-                            # g4.gray — это коэффициент перевода: 1 Гр во внутренних единицах.
-                            try:
-                                hits_map = hc.GetMap()
-                                for copy_no, val_ptr in hits_map.items():
-                                    # val_ptr — указатель на G4double (разыменовывается как float)
-                                    raw_value = float(val_ptr)
-                                    dose_event_gy += raw_value / g4.gray
-                            except AttributeError:
-                                # Fallback: некоторые версии geant4_pybind возвращают
-                                # итерируемый объект с прямым доступом по индексу
-                                try:
-                                    n = hc.entries()
-                                    for i in range(n):
-                                        raw_value = float(hc[i])
-                                        dose_event_gy += raw_value / g4.gray
-                                except Exception as inner_exc:
-                                    logging.warning(
-                                        "Cannot iterate dose HitsMap (entries fallback failed): %s",
-                                        inner_exc
-                                    )
-                        self.tracks.add_electronics_dose_event(dose_event_gy)
-            except Exception as exc:
-                logging.warning("Failed to read dose scorer collection '%s': %s", self.dose_collection_name, exc)
+    def EndOfEventAction(self, anEvent):
         self.event_id = None
 
 class ScreenSteppingAction(g4.G4UserSteppingAction):
@@ -955,7 +904,6 @@ class ActionInitialization(g4.G4VUserActionInitialization):
         tracks,
         current_particle,
         generator,
-        electronics_dose_collection_name: Optional[str] = None
     ):
         super().__init__()
         self.data = data
@@ -966,15 +914,11 @@ class ActionInitialization(g4.G4VUserActionInitialization):
         self.tracks = tracks
         self.current_particle = current_particle
         self.generator = generator
-        self.electronics_dose_collection_name = electronics_dose_collection_name
-    
+
     def Build(self):
         self.SetUserAction(self.generator)
-        
-        event_action = ScreenEventAction(
-            tracks=self.tracks,
-            dose_collection_name=self.electronics_dose_collection_name
-        )
+
+        event_action = ScreenEventAction(tracks=self.tracks)
         self.SetUserAction(event_action)
         self.SetUserAction(ScreenSteppingAction(
             self.primary_out,
@@ -1206,7 +1150,6 @@ class SingleProcessSimulationRunner:
             tracks=tracks,
             current_particle=current_particle,
             generator=generator,
-            electronics_dose_collection_name=geom.electronics_dose_collection_name
         ))
         
         run_manager.Initialize()
@@ -1224,15 +1167,11 @@ class SingleProcessSimulationRunner:
             tracks.energy_profiles,
             tracks.exit_energies,
             layout,
-            events = cfg.events,
+            events=cfg.events,
             electronics_hits=tracks.electronics_hits,
             electronics_info=screen_info.get("Electronics"),
             let_threshold_mev_cm2_mg=cfg.electronics_let_threshold_mev_cm2_mg,
             dose_threshold_gy=cfg.electronics_dose_threshold_gy,
-            absorbed_dose_gy_override=(
-                tracks.electronics_dose_gy_total
-                if tracks.electronics_dose_events > 0 else None
-            ),
             secondary_fluence_threshold=cfg.secondary_fluence_threshold
         )
         logging.info(f'energy summary: {energy_summary}')
@@ -1446,7 +1385,6 @@ def _compute_electronics_let_summary(
     threshold_mev_cm2_mg: float,
     dose_threshold_gy: float,
     events,
-    absorbed_dose_gy_override: Optional[float] = None
 ) -> dict:
     if not electronics_info:
         return {}
@@ -1521,13 +1459,10 @@ def _compute_electronics_let_summary(
     logging.info(f"deposited_energy_mev: {deposited_energy_mev}")
     mass_mg = float(electronics_info.get("mass_mg", 0.0) or 0.0)
     mass_kg = mass_mg * 1e-6 if mass_mg > 0 else 0.0
+    # Ручной подсчёт дозы: D = E_dep [МэВ] * 1.602176634e-13 [Дж/МэВ] / m [кг]
     absorbed_dose_gy = (
-        float(absorbed_dose_gy_override)
-        if absorbed_dose_gy_override is not None
-        else (
-            deposited_energy_mev * 1.602176634e-13 / mass_kg
-            if mass_kg > 0 else None
-        )
+        deposited_energy_mev * 1.602176634e-13 / mass_kg
+        if mass_kg > 0 else None
     )
     # Исправление #4: два показателя нормировки дозы.
     # dose_per_primary_gy     — доза на ОДНО запущенное событие (для экстраполяции на флюенс).
@@ -1575,7 +1510,7 @@ def _compute_electronics_let_summary(
         "dose_per_primary_gy": dose_per_primary_gy,
         "dose_per_hit_event_gy": dose_per_hit_event_gy,
         "n_hit_events": n_hit_events,
-        "dose_source": "g4_ps_dose_deposit" if absorbed_dose_gy_override is not None else "manual_edep_over_mass",
+        "dose_source": "manual_edep_over_mass",
         "dose_threshold_gy": dose_threshold_gy,
         "dose_assessment": {
             "threshold_gy": dose_threshold_gy,
@@ -1623,7 +1558,6 @@ def _compute_energy_summary(
     electronics_info: Optional[dict] = None,
     let_threshold_mev_cm2_mg: float = 1.0,
     dose_threshold_gy: float = 5.0,
-    absorbed_dose_gy_override: Optional[float] = None,
     secondary_fluence_threshold: float = 0.10
 ) -> dict:
     """Вычисляет сводную статистику по энергии.
@@ -1856,7 +1790,6 @@ def _compute_energy_summary(
         threshold_mev_cm2_mg=let_threshold_mev_cm2_mg,
         dose_threshold_gy=dose_threshold_gy,
         events=events,
-        absorbed_dose_gy_override=absorbed_dose_gy_override
     )
 
     # ------------------------------------------------------------------ #
@@ -2148,8 +2081,6 @@ class SimulationRunner:
         all_electronics_hits = []
         all_screen_info      = None
         all_energy_summary   = {}
-        all_absorbed_dose_gy = 0.0
-        has_absorbed_dose_gy = False
         # Суммируем реально выполненные события по всем подпрогонам.
         # cfg.events — события одного прогона; при N частицах суммарно N×events.
         # Используем фактическое число из result_dict["total_particles"],
@@ -2273,27 +2204,6 @@ class SimulationRunner:
 
                     if "energy_summary" in result_dict and result_dict["energy_summary"]:
                         logging.info(f'energy_summary: {result_dict["energy_summary"]}')
-                        electronics_let = (result_dict.get("energy_summary") or {}).get("electronics_let") or {}
-                        # Исправление #1: берём дозу ТОЛЬКО если источник — G4PSDoseDeposit
-                        # (dose_source == "g4_ps_dose_deposit"), т.е. scorer реально сработал.
-                        # Дозу из "manual_edep_over_mass" НЕ суммируем здесь:
-                        # all_electronics_hits уже содержит все edep, и финальный
-                        # _compute_energy_summary сам пересчитает дозу через edep/mass
-                        # без двойного счёта.
-                        dose_source = electronics_let.get("dose_source")
-                        dose_value  = electronics_let.get("absorbed_dose_gy")
-                        if dose_value is not None and dose_source == "g4_ps_dose_deposit":
-                            try:
-                                all_absorbed_dose_gy += float(dose_value)
-                                has_absorbed_dose_gy = True
-                            except (TypeError, ValueError):
-                                pass
-                        elif dose_source == "manual_edep_over_mass":
-                            logging.info(
-                                "Skipping manual_edep_over_mass dose %.6f Gy for particle '%s': "
-                                "will be recomputed from all_electronics_hits in final summary.",
-                                dose_value or 0.0, p_config.name
-                            )
 
                     res_screen = result_dict.get("screen_info", {})
                     res_mats = res_screen.get("Materials", [])
@@ -2380,7 +2290,6 @@ class SimulationRunner:
             # Используем cfg.events * len(cfg.particles) как запасной вариант
             # если all_total_events не накопился (все прогоны упали с ошибкой).
             events=all_total_events if all_total_events > 0 else cfg.events * len(cfg.particles),
-            absorbed_dose_gy_override=(all_absorbed_dose_gy if has_absorbed_dose_gy else None),
             secondary_fluence_threshold=cfg.secondary_fluence_threshold
         )
         logging.info(
