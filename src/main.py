@@ -676,6 +676,22 @@ class ElectronicsSensitiveDetector(g4.G4VSensitiveDetector):
         material = pre_step.GetMaterial()
         density_g_cm3 = material.GetDensity() / (g4.g / g4.cm3) if material else 0.0
 
+        # Диагностика гамма-шагов: логируем процесс взаимодействия.
+        # Гаммы сами не ионизируют — edep появляется только у вторичных электронов
+        # (фотоэлектрон, Комптон-электрон, e+e- пара), рождённых ВНУТРИ детектора.
+        # Если гамма взаимодействовала ДО детектора — её вторичные электроны
+        # рождаются вне объёма и ProcessHits для них не вызывается.
+        if particle_name == "gamma":
+            try:
+                proc_name = post_step.GetProcessDefinedStep().GetProcessName() if post_step.GetProcessDefinedStep() else "unknown"
+            except Exception:
+                proc_name = "unknown"
+            logging.debug(
+                "gamma in Electronics: edep=%.4e MeV, step=%.4e mm, "
+                "pre_E=%.4e MeV, process=%s",
+                edep_mev, step_length_mm, pre_energy_mev, proc_name
+            )
+
         if step_length_mm > 1e-4:  # отсечка микрошагов
             let_step_mev_cm2_mg = (edep_mev / step_length_mm) / (density_g_cm3 * 100.0)
         else:
@@ -1477,6 +1493,19 @@ def _compute_electronics_let_summary(
         absorbed_dose_gy / n_hit_events
         if (absorbed_dose_gy is not None and n_hit_events > 0) else None
     )
+    # Разбивка вклада в дозу по типам частиц — диагностика для анализа гамм.
+    # Гаммы сами не ионизируют: их вклад в edep появляется только через
+    # вторичные электроны (фотоэлектрон, Комптон-e, e+e-), рождённые ВНУТРИ детектора.
+    # Если гамма взаимодействовала ДО детектора — её вторичные электроны
+    # рождаются вне объёма и не попадают в electronics_hits.
+    edep_by_particle: Dict[str, float] = {}
+    hits_by_particle: Dict[str, int] = {}
+    for hit in electronics_hits or []:
+        pname = hit.get("particle", "unknown") or "unknown"
+        edep_by_particle[pname] = edep_by_particle.get(pname, 0.0) + float(hit.get("edep_mev", 0.0) or 0.0)
+        hits_by_particle[pname] = hits_by_particle.get(pname, 0) + 1
+    logging.info(f"edep_by_particle (MeV): {edep_by_particle}")
+    logging.info(f"hits_by_particle (tracks): {hits_by_particle}")
     logging.info(f"dose_per_primary_gy (all events): {dose_per_primary_gy}")
     logging.info(f"dose_per_hit_event_gy (hit events only): {dose_per_hit_event_gy}")
     logging.info(f"deposited_energy_mev: {deposited_energy_mev}")
@@ -1546,7 +1575,13 @@ def _compute_electronics_let_summary(
         "is_dangerous": risk["is_dangerous"],
         "risk_level": risk["level"],
         "reason": risk["reason"],
-        "worst_case_track": max_hit
+        "worst_case_track": max_hit,
+        # Диагностика: вклад в дозу по типам частиц.
+        # Гаммы сами не ионизируют — их вклад идёт через вторичные e- (фотоэлектрон,
+        # Комптон-e, e+e-), рождённые ВНУТРИ детектора. Если гамма взаимодействовала
+        # ДО детектора — её вторичные электроны не попадают в electronics_hits.
+        "edep_by_particle_mev": edep_by_particle,
+        "hits_by_particle": hits_by_particle,
     }
 
 def _compute_energy_summary(
@@ -2542,6 +2577,9 @@ if __name__ == "__main__":
     # Пример: Мульти-частичный последовательный режим
     cfg_multi = SimulationConfig(
         screen_xy_mm=1000,
+        electronics_let_threshold_mev_cm2_mg=10,
+        # electronics_size_x_mm=250,
+        # electronics_size_y_mm=250,
         electronics_thickness_mm=0.5,
         task_id=task_id,
         input_data=data,
@@ -2550,7 +2588,7 @@ if __name__ == "__main__":
             # ParticleConfig(name="e-", energy_mev=10.0),
             # ParticleConfig(name="gamma", energy_mev=20.0)
             # ParticleConfig(name="alpha", energy_mev=70.0),
-            ParticleConfig(name="proton", energy_mev=30.0)
+            ParticleConfig(name="proton", energy_mev=60.0)
             # ParticleConfig(name="neutron", energy_mev=50.0)
         ],
         events=events,
