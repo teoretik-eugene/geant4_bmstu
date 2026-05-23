@@ -213,7 +213,7 @@ def _input_data_to_form_data(input_data: Dict[str, Any]) -> Dict[str, Any]:
 def _call_controller(method: str, path: str, payload: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     url = f"{WEB_CONTROLLER_URL}{path}"
     try:
-        response = requests.request(method=method, url=url, json=payload, timeout=30)
+        response = requests.request(method=method, url=url, json=payload, timeout=60)
     except requests.RequestException as exc:
         raise HTTPException(status_code=502, detail=f"web_controller is unavailable: {exc}") from exc
 

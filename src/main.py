@@ -2468,7 +2468,7 @@ if __name__ == "__main__":
                 {
                     "Name": "Pb",
                     "Description": "Pb layer",
-                    "Width": 4000.0,
+                    "Width": 20000.0,
                     "Elements": [
                         {
                             "Name": "Свинец",
@@ -2476,6 +2476,36 @@ if __name__ == "__main__":
                             "Atomic_number": 82,
                             "Standard_atomic_weight": 207.2,
                             "Density": 11.35,
+                            "Percentage": 100.0
+                        }
+                    ]
+                },
+                {
+                    "Name": "Pb",
+                    "Description": "Pb layer",
+                    "Width": 2000.0,
+                    "Elements": [
+                        {
+                            "Name": "Свинец",
+                            "Symbol": "Pb",
+                            "Atomic_number": 82,
+                            "Standard_atomic_weight": 207.2,
+                            "Density": 11.35,
+                            "Percentage": 100.0
+                        }
+                    ]
+                },
+                                {
+                    "Name": "W",
+                    "Description": "Вольфрам (W) толщиной 2000 мкм",
+                    "Width": 10000.0,
+                    "Elements": [
+                        {
+                            "Name": "Вольфрам",
+                            "Symbol": "W",
+                            "Atomic_number": 74,
+                            "Standard_atomic_weight": 183.84,
+                            "Density": 19.25,
                             "Percentage": 100.0
                         }
                     ]
@@ -2493,7 +2523,7 @@ if __name__ == "__main__":
                 {
                     "Name": "Al",
                     "Description": "Алюминий (Al) толщиной 1000 мкм",
-                    "Width": 1000.0,
+                    "Width": 2000.0,
                     "Elements": [
                         {
                             "Name": "Алюминий",
@@ -2516,21 +2546,6 @@ if __name__ == "__main__":
                 #             "Atomic_number": 13,
                 #             "Standard_atomic_weight": 26.98,
                 #             "Density": 2.7,
-                #             "Percentage": 100.0
-                #         }
-                #     ]
-                # }
-                # {
-                #     "Name": "W",
-                #     "Description": "Вольфрам (W) толщиной 2000 мкм",
-                #     "Width": 1000.0,
-                #     "Elements": [
-                #         {
-                #             "Name": "Вольфрам",
-                #             "Symbol": "W",
-                #             "Atomic_number": 74,
-                #             "Standard_atomic_weight": 183.84,
-                #             "Density": 19.25,
                 #             "Percentage": 100.0
                 #         }
                 #     ]

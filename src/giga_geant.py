@@ -33,7 +33,14 @@ prompt5 = '''
 Укажи правильные символы элементов, атомный номер, стандартный атомный вес элементов, плотность.
 '''
 
-cfg = SimulationGigaConfig(particle="He3", energy_mev=60, events=20, prompt=prompt4)
+
+prompt6 = '''
+Помоги подготовить информацию для экрана. Помоги составить экран из слоев берилия и алюминия. 
+Первый слой толщиной 1000 мкм, а второй 1000 мкм.
+'''
+
+
+cfg = SimulationGigaConfig(particle="He3", energy_mev=60, events=20, prompt=prompt5)
 
 result = run_simulation_with_giga(cfg=cfg)
 
