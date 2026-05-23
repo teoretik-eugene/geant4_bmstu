@@ -1059,7 +1059,16 @@ def run_single_simulation_in_process(config_dict: dict) -> dict:
             str_key = f"{key[0]}_{key[1]}"
             tracks_serializable[str_key] = points
         result_dict["tracks"] = tracks_serializable
-    
+
+    # Сериализуем particle_types для правильной раскраски треков по типу частицы.
+    # Ключ: "event_id_track_id" → имя частицы (str).
+    if result.particle_types:
+        pt_serializable = {}
+        for key, pname in result.particle_types.items():
+            str_key = f"{key[0]}_{key[1]}"
+            pt_serializable[str_key] = pname
+        result_dict["particle_types"] = pt_serializable
+
     return result_dict
 
 def convert_screen_info_to_data(screen: ScreenInfo) -> dict:
@@ -1213,12 +1222,13 @@ class SingleProcessSimulationRunner:
             total_out_primary_particles=len(primary_out),
             total_out_secondary_particles=len(secondary_out),
             tracks=tracks.data if cfg.collect_tracks else None,
+            particle_types=tracks.particle_types if cfg.collect_tracks else None,
             mixed_beam_result=mixed_result,
             energy_profiles=tracks.energy_profiles,
             exit_energies=tracks.exit_energies,
             electronics_hits=tracks.electronics_hits,
             energy_summary=energy_summary
-    )
+        )
 
         # result.energy_profiles = tracks.energy_profiles
         # result.exit_energies = tracks.exit_energies
@@ -2177,7 +2187,18 @@ class SimulationRunner:
                                 tracks[(event_id, track_id)] = points
                             except:
                                 continue
-                    
+
+                    # Восстанавливаем particle_types для правильной раскраски треков
+                    particle_types = None
+                    if "particle_types" in result_dict and result_dict["particle_types"]:
+                        particle_types = {}
+                        for str_key, pname in result_dict["particle_types"].items():
+                            try:
+                                event_id, track_id = map(int, str_key.split('_'))
+                                particle_types[(event_id, track_id)] = pname
+                            except:
+                                continue
+
                     # Создаем SingleParticleResult из словаря
                     result = SingleParticleResult(
                         particle=p_config.name,
@@ -2186,7 +2207,8 @@ class SimulationRunner:
                         total_particles=result_dict["total_particles"],
                         total_out_primary_particles=result_dict["total_out_primary_particles"],
                         total_out_secondary_particles=result_dict["total_out_secondary_particles"],
-                        tracks=tracks
+                        tracks=tracks,
+                        particle_types=particle_types,
                     )
                     particle_results[key] = result
                     # Накапливаем реально выполненные события этого подпрогона
@@ -2588,7 +2610,7 @@ if __name__ == "__main__":
     '''
     # data = ds.get_current_task_to_json(task_id)
     # events = 1_000_000
-    events = 100_000
+    events = 10000
     # Пример: Мульти-частичный последовательный режим
     cfg_multi = SimulationConfig(
         screen_xy_mm=1000,

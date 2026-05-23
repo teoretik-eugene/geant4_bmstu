@@ -577,8 +577,12 @@ def visualize_multi_particle_results(cfg: SimulationConfig, result: SimulationRe
             for particle_result in result.particle_results.values():
                 if not particle_result.tracks:
                     continue
+                pt_map = getattr(particle_result, "particle_types", None) or {}
                 for track_key, pts in particle_result.tracks.items():
-                    yield particle_result.particle, track_key[1], pts
+                    # Берём реальный тип частицы из particle_types.
+                    # Если не найден — используем имя первичной частицы подпрогона.
+                    particle_name = pt_map.get(track_key, particle_result.particle)
+                    yield particle_name, track_key[1], pts
 
         stats = _add_tracks_batched(plotter, pv, iter_tracks())
 
@@ -641,8 +645,12 @@ def visualize_single_particle_results(cfg: SimulationConfig, result: SimulationR
     }
     if result.tracks:
         def iter_tracks():
+            pt_map = getattr(result, "particle_types", None) or {}
             for track_key, pts in result.tracks.items():
-                yield particle_name, track_key[1], pts
+                # Берём реальный тип частицы из particle_types.
+                # Если не найден — используем имя первичной частицы.
+                pname = pt_map.get(track_key, particle_name)
+                yield pname, track_key[1], pts
 
         stats = _add_tracks_batched(plotter, pv, iter_tracks())
 

@@ -95,11 +95,24 @@ class SingleParticleResult:
     total_out_primary_particles: int
     total_out_secondary_particles: int
     tracks: Optional[Dict[Tuple[int, int], List[Tuple[float, float, float]]]] = None
+    # Словарь {(event_id, track_id): particle_name} для правильной раскраски треков
+    particle_types: Optional[Dict[Tuple[int, int], str]] = None
 
     def to_dict(self) -> dict:
+        # asdict() не умеет сериализовать Dict с кортежами-ключами.
+        # Временно подменяем tracks и particle_types на None, потом восстанавливаем.
+        _tracks_backup = self.tracks
+        _pt_backup = self.particle_types
+        self.tracks = None
+        self.particle_types = None
         d = asdict(self)
-        if self.tracks is not None:
-            d["tracks"] = {f"{k[0]}:{k[1]}": v for k, v in self.tracks.items()}
+        self.tracks = _tracks_backup
+        self.particle_types = _pt_backup
+
+        if _tracks_backup is not None:
+            d["tracks"] = {f"{k[0]}_{k[1]}": v for k, v in _tracks_backup.items()}
+        if _pt_backup is not None:
+            d["particle_types"] = {f"{k[0]}_{k[1]}": v for k, v in _pt_backup.items()}
         return d
 
 @dataclass
@@ -120,75 +133,84 @@ class SimulationResult:
     exit_energies: Optional[List[float]] = None
     electronics_hits: Optional[List[Dict[str, Any]]] = None
     energy_summary: Optional[Dict] = None
+    # Словарь {(event_id, track_id): particle_name} для правильной раскраски треков
+    particle_types: Optional[Dict[Tuple[int, int], str]] = None
     
     def to_dict(self) -> dict:
+        # asdict() не умеет сериализовать Dict с кортежами-ключами (tracks, particle_types,
+        # а также вложенные SingleParticleResult.tracks/particle_types).
+        # Временно подменяем проблемные поля на None, потом восстанавливаем вручную.
+        _tracks_backup = self.tracks
+        _pt_backup = self.particle_types
+        _pr_backup = self.particle_results
+        self.tracks = None
+        self.particle_types = None
+        self.particle_results = None
         d = asdict(self)
-        
-        # Обработка tracks для одиночной частицы
-        if self.tracks is not None:
-            d["tracks"] = {f"{k[0]}:{k[1]}": v for k, v in self.tracks.items()}
+        self.tracks = _tracks_backup
+        self.particle_types = _pt_backup
+        self.particle_results = _pr_backup
+
+        # Треки одиночной частицы: {(ev, tr): pts} → {"ev_tr": pts}
+        if _tracks_backup is not None:
+            d["tracks"] = {f"{k[0]}_{k[1]}": v for k, v in _tracks_backup.items()}
+
+        # Типы частиц: {(ev, tr): name} → {"ev_tr": name}
+        if _pt_backup is not None:
+            d["particle_types"] = {f"{k[0]}_{k[1]}": v for k, v in _pt_backup.items()}
+
+        # particle_results сериализуем через собственный to_dict() каждого элемента
+        if _pr_backup is not None:
+            d["particle_results"] = {
+                key: value.to_dict() for key, value in _pr_backup.items()
+            }
 
         if self.exit_energies is not None:
             serialized = []
             for e in self.exit_energies:
                 if isinstance(e, dict):
                     serialized.append({
-                        "energy_mev":   float(e.get("energy_mev", 0.0)),
-                        "is_primary":   bool(e.get("is_primary", True)),
+                        "energy_mev":    float(e.get("energy_mev", 0.0)),
+                        "is_primary":    bool(e.get("is_primary", True)),
                         "particle_type": str(e.get("particle_type", "unknown")),
+                        "event_id":      e.get("event_id"),
                     })
                 else:
-                    # обратная совместимость: просто число
                     serialized.append({
-                        "energy_mev":   float(e),
-                        "is_primary":   True,
+                        "energy_mev":    float(e),
+                        "is_primary":    True,
                         "particle_type": "unknown",
+                        "event_id":      None,
                     })
             d["exit_energies"] = serialized
 
         if self.electronics_hits is not None:
             d["electronics_hits"] = self.electronics_hits
-        
-        # Обработка particle_results
-        if self.particle_results is not None:
-            d["particle_results"] = {
-                key: value.to_dict() for key, value in self.particle_results.items()
-            }
 
         if self.energy_profiles is not None:
             energy_profiles_json = {}
             for key, profile in self.energy_profiles.items():
-                # Ключ: строка вместо кортежа
                 str_key = f"{key[0]}_{key[1]}" if isinstance(key, tuple) else str(key)
-                
-                # Преобразуем кортежи в списках points
                 points_serializable = [
-                    list(point) if isinstance(point, tuple) else point 
+                    list(point) if isinstance(point, tuple) else point
                     for point in profile.get("points", [])
                 ]
-                
                 energy_profiles_json[str_key] = {
-                    "parent_id": profile.get("parent_id", 0),
-                    "particle": profile.get("particle", "unknown"),
-                    "points": points_serializable,  # [[z, E], [z, E], ...]
-                    "n_points": len(points_serializable),
+                    "parent_id":    profile.get("parent_id", 0),
+                    "particle":     profile.get("particle", "unknown"),
+                    "points":       points_serializable,
+                    "n_points":     len(points_serializable),
                     "energy_start": points_serializable[0][1] if points_serializable else None,
-                    "energy_end": points_serializable[-1][1] if points_serializable else None,
-                    "energy_loss": (points_serializable[0][1] - points_serializable[-1][1]) 
-                                   if len(points_serializable) >= 2 else None,
-                    "z_start": points_serializable[0][0] if points_serializable else None,
-                    "z_end": points_serializable[-1][0] if points_serializable else None,
-                    "is_stopped": points_serializable[-1][1] < 0.001 if points_serializable else False
+                    "energy_end":   points_serializable[-1][1] if points_serializable else None,
+                    "energy_loss":  (points_serializable[0][1] - points_serializable[-1][1])
+                                    if len(points_serializable) >= 2 else None,
+                    "z_start":      points_serializable[0][0] if points_serializable else None,
+                    "z_end":        points_serializable[-1][0] if points_serializable else None,
+                    "is_stopped":   points_serializable[-1][1] < 0.001 if points_serializable else False,
                 }
             d["energy_profiles"] = energy_profiles_json
-        
+
         if self.energy_summary is not None:
             d["energy_summary"] = self.energy_summary
-        
-        # Обработка particle_results
-        if self.particle_results is not None:
-            d["particle_results"] = {
-                key: value.to_dict() for key, value in self.particle_results.items()
-            }
-        
+
         return d

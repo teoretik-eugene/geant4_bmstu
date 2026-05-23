@@ -284,16 +284,34 @@ def _build_visualization_result(result_data: Dict[str, Any]) -> SimpleNamespace:
             restored[key] = points
         return restored
 
+    def _deserialize_particle_types(pt_payload: Optional[Dict[str, Any]]) -> Optional[Dict[Any, Any]]:
+        """Восстанавливает {(event_id, track_id): particle_name} из {"ev_tr": name}."""
+        if not pt_payload:
+            return None
+        restored: Dict[Any, Any] = {}
+        for key, pname in pt_payload.items():
+            if isinstance(key, str) and "_" in key:
+                left, right = key.split("_", 1)
+                try:
+                    restored[(int(left), int(right))] = pname
+                    continue
+                except ValueError:
+                    pass
+            restored[key] = pname
+        return restored
+
     particle_results: Dict[str, Any] = {}
     for key, value in (result_data.get("particle_results") or {}).items():
         particle_results[key] = SimpleNamespace(
             particle=value.get("particle"),
             tracks=_deserialize_tracks(value.get("tracks")),
+            particle_types=_deserialize_particle_types(value.get("particle_types")),
         )
 
     return SimpleNamespace(
         particle_results=particle_results or None,
         tracks=_deserialize_tracks(result_data.get("tracks")),
+        particle_types=_deserialize_particle_types(result_data.get("particle_types")),
         screen_info=result_data.get("screen_info"),
         energy_profiles=result_data.get("energy_profiles"),
         exit_energies=result_data.get("exit_energies"),
