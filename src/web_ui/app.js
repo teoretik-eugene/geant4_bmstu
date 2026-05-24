@@ -453,10 +453,133 @@ async function generateScreenWithAi() {
     const data = await res.json();
     console.log(data);
     applyGeneratedScreenConfig(data.form_data);
-    document.getElementById("rawResult").textContent = JSON.stringify(data.input_data, null, 2);
     setStatus("AI configuration loaded into the form. You can edit it and run simulation.", true);
   } catch (e) {
     setStatus(`Error: ${e.message}`, false);
+  }
+}
+
+function showLastSimId(simulationId) {
+  const block = document.getElementById("lastSimId");
+  const valueEl = document.getElementById("lastSimIdValue");
+  if (!block || !valueEl) return;
+  valueEl.textContent = simulationId;
+  block.style.display = "block";
+  valueEl.onclick = () => {
+    navigator.clipboard.writeText(simulationId).catch(() => {});
+  };
+  const loadBtn = document.getElementById("loadLastSimBtn");
+  if (loadBtn) {
+    loadBtn.onclick = () => {
+      const input = document.getElementById("lookupId");
+      if (input) input.value = simulationId;
+      lookupSimulation();
+    };
+  }
+}
+
+async function listSimulations() {
+  const card = document.getElementById("simulationsListCard");
+  const statusEl = document.getElementById("simulationsListStatus");
+  const listEl = document.getElementById("simulationsList");
+  if (!card || !listEl) return;
+
+  card.style.display = "block";
+  statusEl.className = "status ok";
+  statusEl.textContent = "Loading...";
+  listEl.innerHTML = "";
+
+  try {
+    const res = await fetch("/api/simulations?limit=50");
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.detail || `HTTP ${res.status}`);
+    }
+    const data = await res.json();
+    const sims = data.simulations || [];
+
+    if (!sims.length) {
+      statusEl.className = "status ok";
+      statusEl.textContent = "No simulations found.";
+      return;
+    }
+
+    statusEl.className = "status ok";
+    statusEl.textContent = `Found ${sims.length} simulation(s).`;
+
+    const statusColor = { completed: "var(--ok)", failed: "var(--danger)", error: "var(--danger)", running: "var(--accent)", pending: "#888", timeout: "var(--danger)" };
+
+    const rows = sims.map((s) => {
+      const color = statusColor[s.status] || "#888";
+      const idShort = (s.simulation_id || "").slice(0, 8) + "…";
+      return `<tr>
+        <td style="font-family:monospace;font-size:12px;" title="${s.simulation_id || ""}">${idShort}</td>
+        <td style="color:${color};font-weight:600;">${s.status || "—"}</td>
+        <td style="font-size:12px;">${s.created_at ? s.created_at.replace("T", " ").slice(0, 19) : "—"}</td>
+        <td style="font-size:12px;">${s.completed_at ? s.completed_at.replace("T", " ").slice(0, 19) : "—"}</td>
+        <td><button class="add" style="padding:3px 8px;font-size:12px;" onclick="loadSimById('${s.simulation_id}')">Load</button></td>
+      </tr>`;
+    }).join("");
+
+    listEl.innerHTML = `<table style="width:100%;border-collapse:collapse;">
+      <thead><tr style="font-size:12px;color:#4a5067;border-bottom:1px solid var(--line);">
+        <th style="text-align:left;padding:4px 6px;">ID</th>
+        <th style="text-align:left;padding:4px 6px;">Status</th>
+        <th style="text-align:left;padding:4px 6px;">Created</th>
+        <th style="text-align:left;padding:4px 6px;">Completed</th>
+        <th style="padding:4px 6px;"></th>
+      </tr></thead>
+      <tbody>${rows}</tbody>
+    </table>`;
+  } catch (e) {
+    statusEl.className = "status err";
+    statusEl.textContent = `Error: ${e.message}`;
+  }
+}
+
+function loadSimById(simulationId) {
+  const input = document.getElementById("lookupId");
+  if (input) input.value = simulationId;
+  lookupSimulation();
+  document.getElementById("simulationsListCard").scrollIntoView({ behavior: "smooth" });
+}
+
+async function lookupSimulation() {
+  const simulationId = document.getElementById("lookupId").value.trim();
+  const statusEl = document.getElementById("lookupStatus");
+  if (!simulationId) {
+    statusEl.className = "status err";
+    statusEl.textContent = "Error: enter a simulation ID.";
+    return;
+  }
+
+  statusEl.className = "status ok";
+  statusEl.textContent = "Loading...";
+
+  try {
+    const res = await fetch(`/api/simulations/${encodeURIComponent(simulationId)}`);
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.detail || `HTTP ${res.status}`);
+    }
+    const data = await res.json();
+
+    if (data.status !== "completed") {
+      statusEl.className = "status err";
+      statusEl.textContent = `Simulation status: ${data.status}${data.error ? " — " + data.error : ""}`;
+      return;
+    }
+
+    if (data.report) {
+      renderKpi(data.report);
+      renderLayerReport(data.report);
+    }
+    renderFiles(data.generated_files);
+    statusEl.className = "status ok";
+    statusEl.textContent = `Results loaded for simulation ${simulationId}.`;
+  } catch (e) {
+    statusEl.className = "status err";
+    statusEl.textContent = `Error: ${e.message}`;
   }
 }
 
@@ -488,7 +611,6 @@ async function runSimulation() {
   };
 
   setStatus("Simulation is running. Please wait...", true);
-  document.getElementById("rawResult").textContent = "";
 
   try {
     const res = await fetch("/api/run", {
@@ -503,11 +625,11 @@ async function runSimulation() {
     }
 
     const data = await res.json();
+    if (data.simulation_id) showLastSimId(data.simulation_id);
     renderKpi(data.report);
     renderLayerReport(data.report);
     renderFiles(data.generated_files);
-    document.getElementById("rawResult").textContent = JSON.stringify(data.result, null, 2);
-    setStatus("Simulation completed.", true);
+    setStatus(`Simulation completed. ID: ${data.simulation_id || ""}`, true);
   } catch (e) {
     setStatus(`Error: ${e.message}`, false);
   }
@@ -520,6 +642,8 @@ function initUi() {
   const removeParticleBtn = document.getElementById("removeParticleBtn");
   const generateScreenBtn = document.getElementById("generateScreenBtn");
   const runBtn = document.getElementById("runBtn");
+  const lookupBtn = document.getElementById("lookupBtn");
+  const listSimulationsBtn = document.getElementById("listSimulationsBtn");
   const layersContainer = document.getElementById("layersContainer");
 
   if (addLayerBtn) addLayerBtn.addEventListener("click", () => addLayer());
@@ -528,6 +652,10 @@ function initUi() {
   if (removeParticleBtn) removeParticleBtn.addEventListener("click", removeParticleRow);
   if (generateScreenBtn) generateScreenBtn.addEventListener("click", generateScreenWithAi);
   if (runBtn) runBtn.addEventListener("click", runSimulation);
+  if (lookupBtn) lookupBtn.addEventListener("click", lookupSimulation);
+  if (listSimulationsBtn) listSimulationsBtn.addEventListener("click", listSimulations);
+  const lookupIdInput = document.getElementById("lookupId");
+  if (lookupIdInput) lookupIdInput.addEventListener("keydown", (e) => { if (e.key === "Enter") lookupSimulation(); });
 
   if (layersContainer) {
     layersContainer.addEventListener("click", (event) => {

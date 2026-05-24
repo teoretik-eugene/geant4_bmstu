@@ -210,7 +210,8 @@ def _input_data_to_form_data(input_data: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-def _call_controller(method: str, path: str, payload: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+def _call_controller_raw(method: str, path: str, payload: Optional[Dict[str, Any]] = None):
+    """Как _call_controller, но возвращает любой JSON (dict или list)."""
     url = f"{WEB_CONTROLLER_URL}{path}"
     try:
         response = requests.request(method=method, url=url, json=payload, timeout=60)
@@ -228,6 +229,11 @@ def _call_controller(method: str, path: str, payload: Optional[Dict[str, Any]] =
             status_code=502,
             detail=f"web_controller error {response.status_code}: {message or response.text}",
         )
+    return data
+
+
+def _call_controller(method: str, path: str, payload: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    data = _call_controller_raw(method, path, payload)
     return data if isinstance(data, dict) else {}
 
 
@@ -316,6 +322,66 @@ def run_simulation(payload: RunRequest) -> Dict[str, Any]:
         "result": result_dict,
         "input_data": payload_result.get("input_data") or input_data,
         "generated_files": generated_files,
+    }
+
+
+@app.get("/api/simulations")
+def list_simulations(limit: int = 50, offset: int = 0) -> Dict[str, Any]:
+    """Возвращает список симуляций из web_controller (без треков и сырых результатов)."""
+    data = _call_controller_raw("GET", f"/simulations?limit={limit}&offset={offset}")
+    simulations = data if isinstance(data, list) else []
+    items = []
+    for sim in simulations:
+        items.append({
+            "simulation_id": sim.get("simulation_id"),
+            "status": sim.get("status"),
+            "created_at": sim.get("created_at"),
+            "completed_at": sim.get("completed_at"),
+            "error": sim.get("error"),
+        })
+    return {"simulations": items, "total": len(items)}
+
+
+@app.get("/api/simulations/{simulation_id}")
+def get_simulation_result(simulation_id: str) -> Dict[str, Any]:
+    """Возвращает report, generated_files и статус симуляции по её ID.
+    Треки (tracks, particle_types) не передаются — только метрики и ссылки на файлы.
+    """
+    status = _call_controller("GET", f"/simulations/{simulation_id}")
+    sim_status = status.get("status")
+
+    if sim_status not in {"completed", "failed", "error", "timeout"}:
+        return {
+            "status": sim_status or "unknown",
+            "simulation_id": simulation_id,
+            "report": None,
+            "generated_files": [],
+            "error": status.get("error"),
+        }
+
+    if sim_status != "completed":
+        return {
+            "status": sim_status,
+            "simulation_id": simulation_id,
+            "report": None,
+            "generated_files": [],
+            "error": status.get("error"),
+        }
+
+    payload_result = status.get("result") or {}
+    report = payload_result.get("report") or {}
+    generated_files = payload_result.get("generated_files") or []
+    for item in generated_files:
+        url_path = item.get("url_path")
+        if url_path:
+            item["web_url"] = f"{WEB_CONTROLLER_URL}{url_path}"
+
+    return {
+        "status": "completed",
+        "simulation_id": simulation_id,
+        "report": report,
+        "generated_files": generated_files,
+        "error": None,
     }
 
 

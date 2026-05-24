@@ -181,8 +181,29 @@
     <div class="card">
       <div class="btns">
         <button type="button" class="run" id="runBtn">Run simulation</button>
+        <button type="button" class="add" id="listSimulationsBtn">List all simulations</button>
       </div>
       <div id="status" class="status"></div>
+      <div id="lastSimId" style="display:none;margin-top:8px;font-size:13px;color:#4a5067;">
+        Simulation ID: <code id="lastSimIdValue" style="user-select:all;cursor:pointer;" title="Click to copy"></code>
+        <button type="button" class="add" id="loadLastSimBtn" style="margin-left:8px;padding:4px 10px;font-size:12px;">Load results</button>
+      </div>
+    </div>
+
+    <div class="card" id="simulationsListCard" style="display:none;">
+      <h3>All simulations</h3>
+      <div id="simulationsListStatus" class="status"></div>
+      <div id="simulationsList"></div>
+    </div>
+
+    <div class="card">
+      <h3>Lookup results by simulation ID</h3>
+      <p class="muted">Enter a simulation ID to retrieve its metrics, report and generated plots.</p>
+      <div style="display:flex;gap:8px;align-items:flex-end;">
+        <div style="flex:1;"><label>Simulation ID</label><input id="lookupId" type="text" placeholder="e.g. 3fa85f64-5717-4562-b3fc-2c963f66afa6"></div>
+        <button type="button" class="run" id="lookupBtn" style="white-space:nowrap;">Get results</button>
+      </div>
+      <div id="lookupStatus" class="status"></div>
     </div>
 
     <div class="card">
@@ -192,8 +213,6 @@
       <pre id="layerReport"></pre>
       <h4>Generated plots</h4>
       <div id="files" class="files"></div>
-      <h4>Raw JSON result</h4>
-      <pre id="rawResult"></pre>
     </div>
   </div>
 
